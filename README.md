@@ -59,79 +59,6 @@ This repository references the SDK via the `:sdk-local` submodule so you can bui
 ./gradlew :app:bundleRelease
 ```
 
-After building, the APK/AAB outputs are located at:
-
-- `app/build/outputs/apk/debug/`
-- `app/build/outputs/apk/release/`
-- `app/build/outputs/bundle/release/`
-
-### Unsigned vs. signed release APK
-
-By default, `assembleRelease` produces an **unsigned** APK (no `signingConfig` is applied). This keeps the public repository free of any commit history containing credentials.
-
-To produce a **locally signed** release APK, supply credentials one of two ways — Gradle picks them up automatically (see `app/build.gradle.kts`):
-
-**Option A — environment variables:**
-```bash
-export RELEASE_STORE_FILE=/path/to/your.keystore
-export RELEASE_STORE_PASSWORD="your-store-password"
-export RELEASE_KEY_ALIAS="your-key-alias"
-export RELEASE_KEY_PASSWORD="your-key-password"
-./gradlew :app:assembleRelease
-```
-
-**Option B — git-ignored `keystore.properties` file at the project root:**
-
-Create `keystore.properties` in the repository root (this file is git-ignored — it will never be committed):
-
-```properties
-RELEASE_STORE_FILE=/path/to/your.keystore
-RELEASE_STORE_PASSWORD=your-store-password
-RELEASE_KEY_ALIAS=your-key-alias
-RELEASE_KEY_PASSWORD=your-key-password
-```
-
-Then build normally:
-
-```bash
-./gradlew :app:assembleRelease
-```
-
-When all four values are present and the store file exists, Gradle applies a `userReleaseSigning` signing config and outputs a verifiable signed APK. When any value is missing, it falls back to producing an unsigned APK with a clear message in the build log — the build does not fail.
-
-> **Debug builds** and **tests** are unaffected: they always use the bundled debug keystore, and never require release credentials.
-
-### Using the sync-and-build script
-
-A convenience script is provided at `scripts/sync-and-build.sh`. It syncs the project over SSH to a remote build host, runs Gradle, and optionally installs the debug APK.
-
-Required environment variables:
-
-| Variable            | Description                                                  |
-| ------------------- | ------------------------------------------------------------ |
-| `SYNC_SSH_KEY`      | Path to the SSH private key for the build host.              |
-| `SYNC_SSH_HOST`     | SSH destination (e.g. `user@host`).                          |
-| `SYNC_REMOTE_DIR`   | Remote directory to sync into.                               |
-| `SYNC_ADB_DEVICE`   | *(Optional)* ADB device serial for `--install` / `--install-device`. |
-
-> **Note:** this script works on the sync host; remember that the remote checkout must also have the SDK submodule initialised (`git submodule update --init --recursive`) before building.
-
-```bash
-export SYNC_SSH_KEY="$HOME/.ssh/host_key"
-export SYNC_SSH_HOST="user@my-builder"
-export SYNC_REMOTE_DIR="/home/user/hermes-android"
-
-./scripts/sync-and-build.sh                 # sync + build
-./scripts/sync-and-build.sh --install        # sync + build + install on default emulator
-```
-
-## Run / Install
-
-1. Check out and initialise the SDK submodule (`git submodule update --init --recursive`).
-2. Build the debug APK as described above.
-3. Copy the APK to your device and open it, or use `adb install`.
-4. Grant camera and microphone permissions when prompted for those features.
-
 ## Configuration
 
 On first launch the app asks for your homeserver URL; after that, log in with your Matrix credentials. There is no hardcoded or default server — you must supply your own.
@@ -170,12 +97,6 @@ Because the SDK is a submodule, the project **cannot build until the submodule i
 > **`compileSdk` mismatch notice:** `sdk-local` is configured with `compileSdk = 36` while the `:app` module targets `compileSdk = 35`. This may produce a warning during build but does not block the build. It is tracked as a known issue and will be aligned in a future update.
 
 If you need to update the SDK bindings or native library, make the changes in the SDK submodule repository and update the submodule pointer in this repository.
-
-## Privacy & Security
-
-- Connections travel over HTTPS; the network security configuration disallows cleartext traffic and trusts only system certificate authorities.
-- No telemetry or analytics SDK is bundled or configured in the app.
-- Push notifications are routed through the UnifiedPush framework — choose your own distributor or use the built-in ntfy channel. Endpoint URLs, access tokens, and UnifiedPush instance identifiers are stored locally on the device via `SharedPreferences`.
 
 ## Known limitations
 
