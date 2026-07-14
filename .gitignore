@@ -1,0 +1,33 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+*.iml
+.idea/
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local configuration
+local.properties
+
+# Kotlin compiler caches (generated)
+.kotlin/
+
+# Maintainer / AI tooling (not part of the public repository)
+.claude/
+AGENTS.md
+CLAUDE.md
+
+# GitNexus index cache
+.gitnexus/
+
+# Keystores and local signing material (never commit)
+*.keystore
+*.jks
+
+# Local SDK helper artifacts / prebuilt copy not tracked in this repo
+libs/sdk/
