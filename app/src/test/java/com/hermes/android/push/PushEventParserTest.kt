@@ -228,7 +228,7 @@ class PushEventParserTest {
 
         @Test
         fun `prefers sender_display_name over sender`() {
-            val bytes = eventIdOnlyPayload(senderDisplayName: "Bob Display")
+            val bytes = eventIdOnlyPayload(senderDisplayName = "Bob Display")
             val event = parser.parseAndFilter(bytes, boundRoomId = null, isForeground = false, timeoutMinutes = 5)
             assertNotNull(event)
             assertEquals("Bob Display", event!!.sender)

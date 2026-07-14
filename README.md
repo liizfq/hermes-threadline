@@ -107,7 +107,7 @@ If you need to update the SDK bindings or native library, make the changes in th
 - **Thread back-pagination:** due to the SDK's focused-timeline model, reaching the top of a very long thread may require manual (user-triggered) back-pagination; the automatic page-back triggers are conservative and are driven by `ActiveThread`'s `paginateOnce` / auto-paginate heuristic (`MIN_MESSAGES_BEFORE_INITIAL_PAGINATE`).
 - **Session discovery:** when a session is started on another client, the app picks it up via a `DiscoveryListener` on the room timeline (debounced refresh). This covers real-time detection, but may not catch every historical-update edge case during initial sync.
 - **Formatted messages and spaces:** some edge cases in formatted messages, threads, and group spaces may not yet be fully handled.
-- **No license file:** no license file is present in this repository. Until one is added, the project is **not licensed for redistribution, modification, or commercial use** (see the License section below).
+
 
 ## Contributing
 
@@ -121,7 +121,10 @@ Contributions are welcome. Before opening a pull request:
 
 ## License
 
-No license file is present in this repository. Until one is added, the project is **not licensed for redistribution, modification, or commercial use**. If you are interested in contributing or reusing the code, please open an issue to discuss licensing.
+This project is licensed under the [MIT License](LICENSE).
+
+The MIT License applies to this repository's original code. Third-party
+dependencies, including the matrix-rust-sdk, retain their respective licenses.
 
 ## Acknowledgements
 
