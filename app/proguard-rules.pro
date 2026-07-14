@@ -74,6 +74,12 @@
 # R8 ships built-in Compose rules, but we pin a safety net to be explicit.
 -keep class androidx.compose.runtime.** { *; }
 
+# ── rustls platform verifier JNI ─────────────────────────────────────────
+# rustls CertificateVerifier JNI binding must survive ProGuard shrinking
+# or the release APK crashes with ClassNotFoundException /
+# "failed to call native verifier" when TLS verification runs.
+-keep class org.rustls.platformverifier.** { *; }
+
 # Hilt / KSP generated code
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }

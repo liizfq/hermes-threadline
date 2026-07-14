@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -16,6 +17,16 @@
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules">
+        <!-- Disable automatic WorkManager initialization; HermesApp implements
+             Configuration.Provider to inject HiltWorkerFactory. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                tools:node="remove" />
+        </provider>
         <activity
             android:name="com.hermes.android.MainActivity"
             android:exported="true"
@@ -36,6 +47,14 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <!--
+          Single UnifiedPush messaging receiver.
+          — onNewEndpoint/unregistered/registrationFailed: handles lifecycle & pusher registration.
+          — onMessage: parse → dedup → enqueue via the event pipeline (EventPushWorker).
+          Do NOT register a second receiver for these same actions; the connector library
+          broadcasts to all matching receivers and racing handlers would corrupt endpoint
+          state or double-handle messages.
+        -->
         <receiver
             android:name="com.hermes.android.push.HermesUnifiedPushReceiver"
             android:exported="true"

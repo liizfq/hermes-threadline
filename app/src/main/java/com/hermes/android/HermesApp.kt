@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.hilt.work.HiltWorkerFactory
+import androidx.work.Configuration
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.hermes.android.media.data.MxcImageLoaderFactory
@@ -19,12 +21,21 @@ import javax.inject.Inject
 private const val TAG = "HermesApp"
 
 @HiltAndroidApp
-class HermesApp : Application(), ImageLoaderFactory {
+class HermesApp : Application(), ImageLoaderFactory, Configuration.Provider {
     @Inject
     lateinit var mxcImageLoaderFactory: MxcImageLoaderFactory
 
     @Inject
     lateinit var pushServiceManager: PushServiceManager
+
+    @Inject
+    lateinit var workerFactory: HiltWorkerFactory
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setWorkerFactory(workerFactory)
+            .setMinimumLoggingLevel(android.util.Log.DEBUG)
+            .build()
 
     override fun onCreate() {
         super.onCreate()

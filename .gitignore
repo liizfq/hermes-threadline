@@ -28,6 +28,7 @@ CLAUDE.md
 # Keystores and local signing material (never commit)
 *.keystore
 *.jks
+keystore.properties
 
 # Local SDK helper artifacts / prebuilt copy not tracked in this repo
 libs/sdk/

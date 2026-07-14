@@ -1,28 +1,18 @@
 # Hermes for Matrix
 
-An Android Matrix client built in Kotlin and Jetpack Compose, backed by the [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk) Android FFI bindings.
+An Android mobile control client for [Hermes Agent](https://hermes-agent.nousresearch.com/docs), using a Matrix homeserver to carry AI communication. It implements message filtering and native Hermes command mapping — routing Hermes responses through threadline-rendered Matrix threads — and is designed for private/personal mobile access to Hermes. Built in Kotlin and Jetpack Compose, backed by the [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk) Android FFI bindings.
 
 > **Note:** This is a development preview (v0.1.0). It is not a product of, or officially affiliated with, the Matrix.org or Element teams.
-
-## Name
-
-This project is published as **Hermes** (Android package `com.hermes.android`). It is an independent Matrix client; it is not a product of, or officially affiliated with, the Matrix.org or Element teams.
 
 ## Features
 
 - **Login with your own homeserver** — enter any homeserver URL directly.
-- **Sessions & threads** — browse rooms, spaces, and message threads.
+- **Sessions & threads** — bind a single Matrix room as the Hermes control channel; each thread within that room is treated as a separate Hermes session, sorted by the timestamp of the latest reply.
 - **Rich messaging** — Markdown and HTML formatting with full rendering.
 - **Media & attachments** — send and receive images, audio, video, and voice messages.
 - **Message reactions** — react to messages with emoji.
-- **Push notifications** — via [UnifiedPush](https://unifiedpush.org/), including optional ntfy and system notification channels.
-- **Localisation** — English and Chinese (simplified) UI; English is the default.
-- **Accessibility** — adjustable default chat font size.
-- **Responsive layout** — two-pane UI on landscape and large-screen devices.
-
-## Screenshots
-
-Screenshots will be added in a future release.
+- **Push notifications** — ntfy-based notifications are implemented. Official/system notification channels are not implemented yet.
+- **E2EE not supported** — messages are **not** end-to-end encrypted; they are transmitted in plain text over the Matrix transport (HTTPS). Do not use this app for sensitive communications requiring end-to-end encryption.
 
 ## Requirements
 
@@ -74,6 +64,42 @@ After building, the APK/AAB outputs are located at:
 - `app/build/outputs/apk/debug/`
 - `app/build/outputs/apk/release/`
 - `app/build/outputs/bundle/release/`
+
+### Unsigned vs. signed release APK
+
+By default, `assembleRelease` produces an **unsigned** APK (no `signingConfig` is applied). This keeps the public repository free of any commit history containing credentials.
+
+To produce a **locally signed** release APK, supply credentials one of two ways — Gradle picks them up automatically (see `app/build.gradle.kts`):
+
+**Option A — environment variables:**
+```bash
+export RELEASE_STORE_FILE=/path/to/your.keystore
+export RELEASE_STORE_PASSWORD="your-store-password"
+export RELEASE_KEY_ALIAS="your-key-alias"
+export RELEASE_KEY_PASSWORD="your-key-password"
+./gradlew :app:assembleRelease
+```
+
+**Option B — git-ignored `keystore.properties` file at the project root:**
+
+Create `keystore.properties` in the repository root (this file is git-ignored — it will never be committed):
+
+```properties
+RELEASE_STORE_FILE=/path/to/your.keystore
+RELEASE_STORE_PASSWORD=your-store-password
+RELEASE_KEY_ALIAS=your-key-alias
+RELEASE_KEY_PASSWORD=your-key-password
+```
+
+Then build normally:
+
+```bash
+./gradlew :app:assembleRelease
+```
+
+When all four values are present and the store file exists, Gradle applies a `userReleaseSigning` signing config and outputs a verifiable signed APK. When any value is missing, it falls back to producing an unsigned APK with a clear message in the build log — the build does not fail.
+
+> **Debug builds** and **tests** are unaffected: they always use the bundled debug keystore, and never require release credentials.
 
 ### Using the sync-and-build script
 
@@ -155,7 +181,6 @@ If you need to update the SDK bindings or native library, make the changes in th
 
 - Only `arm64-v8a` is currently supported.
 - **compileSdk mismatch:** `:sdk-local` is configured with `compileSdk = 36` while `:app` targets `compileSdk = 35`. This produces a warning during build but does not block the build. It is tracked for alignment in a future update.
-- **Release signing is not configured:** only a debug signing config is configured in `app/build.gradle.kts`. Before any public release, a proper release keystore and `signingConfig` must be configured.
 - **Native ABI:** the app only ships the arm64-v8a native ABI (`libmatrix_sdk_ffi.so`). Devices on other ABIs (e.g. armeabi-v7a, x86_64) will crash at native library load because no alternative is bundled.
 - **Thread timeline stability:** the app uses the SDK's focused-timeline API for threads. Because focused timelines are thread-scoped views with their own timeline loading and live-update streams, some edge cases remain around cold-start/history-loading and after process death or background/foreground transitions. The newer `refresh_thread` API (present in the SDK FFI bindings but **not yet integrated** into this app) is the intended path to mitigate these; until then, edge-case reloads or stale views can still occur.
 - **Thread back-pagination:** due to the SDK's focused-timeline model, reaching the top of a very long thread may require manual (user-triggered) back-pagination; the automatic page-back triggers are conservative and are driven by `ActiveThread`'s `paginateOnce` / auto-paginate heuristic (`MIN_MESSAGES_BEFORE_INITIAL_PAGINATE`).
