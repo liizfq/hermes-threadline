@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 private const val TAG = "SessionListVM"
 
@@ -33,26 +34,43 @@ class SessionListViewModel @Inject constructor(
     val boundRoomId: StateFlow<String?> = settingsRepository.observeBoundRoom()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), settingsRepository.getBoundRoomId())
 
-    val sessions: StateFlow<UiState<List<Session>>> = flow {
-        val roomId = settingsRepository.observeBoundRoom().filterNotNull().first()
-        Log.d(TAG, "sessions flow: roomId=$roomId")
-        val room = withContext(Dispatchers.IO) {
-            roomRepository.getRoom(roomId)
-        }
-        Log.d(TAG, "sessions flow: room=${room?.id() ?: "null"}")
-        if (room != null) {
-            emitAll(sessionRepository.observeSessions(room))
-        }
-    }
-            .map<List<Session>, UiState<List<Session>>> {
-                Log.d(TAG, "sessions updated: ${it.size} items")
-                UiState.Success(it)
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val sessions: StateFlow<UiState<List<Session>>> = settingsRepository.observeBoundRoom()
+        .filterNotNull()
+        .distinctUntilChanged()
+        .flatMapLatest { roomId ->
+            flow {
+                Log.d(TAG, "sessions flow: roomId=$roomId")
+                val room = withContext(Dispatchers.IO) {
+                    roomRepository.getRoom(roomId)
+                }
+                Log.d(TAG, "sessions flow: room=${room?.id() ?: "null"}")
+                if (room != null) {
+                    // Bind the application-scoped store to this room. The
+                    // store survives UI collector churn; subsequent collectors
+                    // (and ChatViewModel reconcile) read the same state. On
+                    // Start/Switch the store takes ownership of `room`; on
+                    // NoOp (duplicate handle) the caller owns it and must
+                    // close it to avoid leaking the SDK handle.
+                    val tookOwnership = sessionRepository.ensureSessionsStarted(room, roomId)
+                    if (!tookOwnership) {
+                        try { room.close() } catch (_: Exception) {}
+                    }
+                    emitAll(sessionRepository.observeSessions())
+                } else {
+                    emit(emptyList())
+                }
             }
-            .catch {
-                Log.e(TAG, "sessions flow error", it)
-                emit(UiState.Error(it.message ?: "Unknown error"))
-            }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+        }
+        .map<List<Session>, UiState<List<Session>>> {
+            Log.d(TAG, "sessions updated: ${it.size} items")
+            UiState.Success(it)
+        }
+        .catch {
+            Log.e(TAG, "sessions flow error", it)
+            emit(UiState.Error(it.message ?: "Unknown error"))
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UiState.Loading)
 
     val filteredSessions: StateFlow<UiState<List<Session>>> =
         combine(sessions, searchQuery) { state, query ->
@@ -117,6 +135,15 @@ class SessionListViewModel @Inject constructor(
                 if (!title.isNullOrBlank() && !eventId.isNullOrBlank()) {
                     Log.d(TAG, "createNewSession: saving title for eventId=$eventId")
                     settingsRepository.saveSessionTitle(eventId, title)
+                } else if (!eventId.isNullOrBlank()) {
+                    // No user-supplied title — still prime the session cache with
+                    // the root body so the first push notification (which can
+                    // arrive before the 5s ThreadList refresh) resolves to a
+                    // real title instead of falling through to "Session".
+                    // The next ThreadList refresh overwrites this with the
+                    // canonical session data.
+                    Log.d(TAG, "createNewSession: saving provisional title for eventId=$eventId")
+                    settingsRepository.saveProvisionalSessionTitle(roomId, eventId, message)
                 }
                 viewModelScope.launch {
                     delay(5000)

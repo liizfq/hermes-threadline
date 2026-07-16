@@ -15,6 +15,7 @@ import androidx.work.WorkerParameters
 import com.hermes.android.MainActivity
 import com.hermes.android.R
 import com.hermes.android.data.repository.MatrixRepository
+import com.hermes.android.data.repository.SessionRepository
 import com.hermes.android.data.repository.SettingsRepository
 import com.hermes.android.ui.settings.LocaleManager
 import com.hermes.android.ui.settings.strEnZh
@@ -24,6 +25,54 @@ import org.matrix.rustcomponents.sdk.NotificationEvent
 import org.matrix.rustcomponents.sdk.NotificationProcessSetup
 import org.matrix.rustcomponents.sdk.NotificationStatus
 import org.matrix.rustcomponents.sdk.TimelineEventContent
+
+/**
+ * Format a thread-root body into a display title using the same rule as the
+ * ThreadList UI (`SessionRepositoryImpl.mapThreadListItemToSession`):
+ * - Blank/null body  -> "Session".
+ * - Body <= 50 chars  -> body verbatim.
+ * - Body >  50 chars  -> first 50 chars + "...".
+ *
+ * This is a parallel copy of that rule, not a shared/centralized helper —
+ * `SessionRepositoryImpl` still owns its own implementation. The two are kept
+ * in sync so a push notification shows the same title the user sees in the
+ * session list, instead of leaking the underlying Matrix event id.
+ */
+internal fun formatSessionTitle(rootBody: String?): String {
+    if (rootBody.isNullOrBlank()) return SESSION_TITLE_FALLBACK
+    return if (rootBody.length > SESSION_TITLE_MAX) {
+        rootBody.take(SESSION_TITLE_MAX) + ELLIPSIS
+    } else {
+        rootBody
+    }
+}
+
+/**
+ * Pick a non-blank thread title from the cached session list.
+ *
+ * Returns null when [sessions] is null, no entry matches [threadRootId],
+ * or the matched title is blank — letting the caller fall through to the
+ * SDK root-body lookup. Pure (no Android/SDK deps); covered by
+ * [FormatSessionTitleTest].
+ *
+ * Mirrors the ThreadList UI rule `customTitle ?: session.title`: when the
+ * cache holds a title for this thread root, the push notification shows the
+ * same title the user already sees in the session list — even when the SDK
+ * root lookup would fail (redaction, network, eviction).
+ */
+internal fun pickCacheSessionTitle(
+    sessions: List<com.hermes.android.domain.model.Session>?,
+    threadRootId: String,
+): String? =
+    sessions
+        ?.firstOrNull { it.id == threadRootId }
+        ?.title
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+private const val SESSION_TITLE_MAX = 50
+private const val SESSION_TITLE_FALLBACK = "Session"
+private const val ELLIPSIS = "..."
 
 /**
  * Drains the [EventPushEvent] queue and emits a system notification for each.
@@ -45,6 +94,7 @@ class EventPushWorker @AssistedInject constructor(
     private val matrixRepository: MatrixRepository,
     private val pushEventStore: PushEventStore,
     private val settingsRepository: SettingsRepository,
+    private val sessionRepository: SessionRepository,
 ) : CoroutineWorker(appContext, params) {
 
     private val notificationManager =
@@ -64,12 +114,120 @@ class EventPushWorker @AssistedInject constructor(
             event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
         }
 
+        // For events targeting the bound room, let the application-scoped store
+        // pick up any thread roots that haven't propagated into the cache yet.
+        // Awaits each shared refresh so this round's title resolution sees the
+        // refreshed snapshot / cache.
+        val boundRoomId = settingsRepository.getBoundRoomId()
+        if (boundRoomId != null) {
+            for ((key, _) in byThread) {
+                val eventRoomId = key.first
+                val threadRootId = key.second
+                if (eventRoomId == boundRoomId) {
+                    sessionRepository.refreshIfMissing(boundRoomId, threadRootId)
+                }
+            }
+        }
+
         for ((key, threadEvents) in byThread) {
-            val notificationId = stableNotificationId(key.first, key.second)
-            showNotification(notificationId, threadEvents.last(), threadEvents.size)
+            val notificationId = stableSessionNotificationId(key.first, key.second)
+            val latest = threadEvents.last()
+            val threadRootId = latest.threadRootId?.takeIf { it.isNotBlank() } ?: latest.eventId
+            val title = resolveNotificationTitle(latest, threadRootId)
+            showNotification(notificationId, latest, threadEvents.size, title)
         }
 
         return Result.success()
+    }
+
+    /**
+     * Resolve the user-visible title for a thread notification.
+     *
+     * Priority (mirrors ThreadList UI `customTitle ?: session.title`):
+     *  1. Local custom session title from [SettingsRepository.getSessionTitle].
+     *  2. In-memory session snapshot from the application-scoped
+     *     [SessionRepository.sessionsSnapshot] (fresher than the persisted
+     *     cache); falls back to the persisted [SettingsRepository.getSessionCache]
+     *     scoped to the event's room.
+     *  3. Body of the thread root event, formatted by [formatSessionTitle].
+     *  4. Literal `"Session"` — never the Matrix event id.
+     *
+     * When the latest event already IS the root (no thread), its body is reused
+     * to avoid a second SDK round-trip. The root body lookup also uses the SDK
+     * `NotificationClient` (same as event resolution) so `event_id_only` pushes
+     * still yield a meaningful title even when the payload lacks `content.body`.
+     * No focused timeline is opened for the push — only the shared
+     * [SessionRepository.refreshIfMissing] has run by this point.
+     *
+     * Each resolution logs its source (`custom` / `store` / `cache` / `sdk` /
+     * `fallback`) along with the thread root id — never the message body — so
+     * the path actually taken is verifiable from logcat without leaking push
+     * contents.
+     */
+    private suspend fun resolveNotificationTitle(
+        latest: EventPushEvent,
+        threadRootId: String,
+    ): String {
+        settingsRepository.getSessionTitle(threadRootId)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let {
+                Log.d(TAG, "resolveNotificationTitle: source=custom root=$threadRootId")
+                return it
+            }
+
+        val inMemory = sessionRepository.sessionsSnapshot()
+        if (inMemory.isNotEmpty()) {
+            pickCacheSessionTitle(inMemory, threadRootId)?.let {
+                Log.d(TAG, "resolveNotificationTitle: source=store root=$threadRootId")
+                return it
+            }
+        }
+
+        pickCacheSessionTitle(settingsRepository.getSessionCache(latest.roomId), threadRootId)
+            ?.let {
+                Log.d(TAG, "resolveNotificationTitle: source=cache root=$threadRootId")
+                return it
+            }
+
+        val rootBody = if (threadRootId == latest.eventId) {
+            latest.body
+        } else {
+            resolveThreadRootBody(latest.roomId, threadRootId)
+        }
+        val source = if (rootBody.isNullOrBlank()) "fallback" else "sdk"
+        Log.d(TAG, "resolveNotificationTitle: source=$source root=$threadRootId")
+        return formatSessionTitle(rootBody)
+    }
+
+    /**
+     * Resolve the thread root event body via the SDK `NotificationClient`.
+     *
+     * Returns null on any failure (no authenticated client, network error,
+     * redaction, not-found) so [formatSessionTitle] can fall back to "Session".
+     * The notification client is `AutoCloseable` and is closed here.
+     */
+    private suspend fun resolveThreadRootBody(roomId: String, threadRootId: String): String? {
+        return try {
+            val client = matrixRepository.getClient()
+                ?: matrixRepository.restoreSession()?.getOrNull()
+                ?: return null
+
+            val nc = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
+            try {
+                when (val status = nc.getNotification(roomId, threadRootId)) {
+                    is NotificationStatus.Event -> extractBody(status.item)
+                    is NotificationStatus.EventFilteredOut,
+                    is NotificationStatus.EventNotFound,
+                    is NotificationStatus.EventRedacted -> null
+                }
+            } finally {
+                nc.close()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveThreadRootBody: SDK lookup failed for $roomId:$threadRootId", e)
+            null
+        }
     }
 
     /**
@@ -108,13 +266,9 @@ class EventPushWorker @AssistedInject constructor(
         }
     }
 
-    private fun showNotification(notificationId: Int, latest: EventPushEvent, count: Int) {
+    private fun showNotification(notificationId: Int, latest: EventPushEvent, count: Int, title: String) {
         val locale = LocaleManager.currentLocale()
         val threadRootId = latest.threadRootId?.takeIf { it.isNotBlank() } ?: latest.eventId
-        val threadTitle = settingsRepository.getSessionTitle(threadRootId)
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: threadRootId
         val fullBody = latest.body?.take(200) ?: ""
 
         val displayBody = when (latest.msgType) {
@@ -136,7 +290,7 @@ class EventPushWorker @AssistedInject constructor(
         val notification = NotificationCompat.Builder(applicationContext, "hermes_messages")
             .setSmallIcon(R.drawable.ic_notification)
             // The notification represents the conversation thread, not the sender ID.
-            .setContentTitle(threadTitle)
+            .setContentTitle(title)
             .setContentText(displayBody)
             .setStyle(NotificationCompat.BigTextStyle().bigText(displayBody))
             .setAutoCancel(true)
@@ -147,12 +301,6 @@ class EventPushWorker @AssistedInject constructor(
 
         notificationManager.notify(notificationId, notification.build())
         Log.d(TAG, "Notification shown: id=$notificationId count=$count threadRoot=$threadRootId")
-    }
-
-    private fun stableNotificationId(roomId: String, threadRootId: String): Int {
-        var hash = 17
-        for (ch in "$roomId:$threadRootId") hash = hash * 31 + ch.code
-        return hash and 0x7FFFFFFF
     }
 
     companion object {

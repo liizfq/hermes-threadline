@@ -9,8 +9,90 @@ import com.hermes.android.domain.model.Session
 import com.hermes.android.ui.settings.LocaleManager
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Maximum length of a provisional session title. Matches the ThreadList UI
+ * rule in `SessionRepositoryImpl.mapThreadListItemToSession` and the push
+ * `formatSessionTitle` rule, so the cache lookup returns the same string the
+ * user sees in the session list.
+ */
+private const val PROVISIONAL_TITLE_MAX = 50
+private const val PROVISIONAL_ELLIPSIS = "..."
+
+/** Legacy single-room cache key from before the store scoped cache by roomId. */
+internal const val LEGACY_SESSION_CACHE_KEY = "session_cache_json"
+
+/** Prefix for room-scoped cache keys; full key is `<prefix><roomId>`. */
+internal const val SESSION_CACHE_KEY_PREFIX = "session_cache_json::"
+
+internal fun sessionCacheKey(roomId: String): String = SESSION_CACHE_KEY_PREFIX + roomId
+
+/**
+ * Read the room-scoped cache JSON for [roomId], migrating the legacy
+ * single-room blob exactly once when [roomId] equals [boundRoomId].
+ *
+ * Returns one of:
+ *  - The cached JSON for [roomId], if present.
+ *  - The legacy JSON migrated into [roomId]'s key (only when [roomId] equals
+ *    [boundRoomId]); the legacy key is removed atomically with the write so
+ *    it can never leak to another room.
+ *  - null if neither key has data (or [boundRoomId] does not match).
+ *
+ * Pure over [prefs] — extracted so the migration logic is unit-testable
+ * without [SettingsRepositoryImpl] / Android [Context].
+ */
+internal fun migrateLegacySessionCache(
+    prefs: SharedPreferences,
+    roomId: String,
+    boundRoomId: String?,
+): String? {
+    val key = sessionCacheKey(roomId)
+    prefs.getString(key, null)?.let { return it }
+    if (boundRoomId != null && boundRoomId == roomId) {
+        val legacy = prefs.getString(LEGACY_SESSION_CACHE_KEY, null) ?: return null
+        prefs.edit()
+            .putString(key, legacy)
+            .remove(LEGACY_SESSION_CACHE_KEY)
+            .apply()
+        return legacy
+    }
+    return null
+}
+
+internal fun buildProvisionalSession(
+    threadRootId: String,
+    rootBody: String,
+    nowMs: Long,
+): Session? {
+    if (rootBody.isBlank()) return null
+    val title = if (rootBody.length > PROVISIONAL_TITLE_MAX) {
+        rootBody.take(PROVISIONAL_TITLE_MAX) + PROVISIONAL_ELLIPSIS
+    } else {
+        rootBody
+    }
+    return Session(
+        id = threadRootId,
+        title = title,
+        lastMessage = rootBody,
+        lastActivityTime = Instant.ofEpochMilli(nowMs),
+        replyCount = 0,
+        unreadCount = 0,
+        isProcessing = false,
+        senderAvatarUrl = null,
+        latestEventId = threadRootId,
+    )
+}
+
+internal fun upsertProvisionalSession(
+    existing: List<Session>?,
+    provisional: Session,
+): List<Session> {
+    val without = existing?.filter { it.id != provisional.id } ?: emptyList()
+    return listOf(provisional) + without
+}
 
 @Singleton
 class SettingsRepositoryImpl @Inject constructor(
@@ -81,7 +163,7 @@ class SettingsRepositoryImpl @Inject constructor(
         prefs.edit().remove("session_read_timestamps").apply()
     }
 
-    override fun saveSessionCache(sessions: List<Session>) {
+    override fun saveSessionCache(roomId: String, sessions: List<Session>) {
         val jsonArray = JSONArray()
         for (session in sessions) {
             val json = JSONObject()
@@ -96,32 +178,34 @@ class SettingsRepositoryImpl @Inject constructor(
             session.latestEventId?.let { json.put("latestEventId", it) }
             jsonArray.put(json)
         }
-        prefs.edit().putString("session_cache_json", jsonArray.toString()).apply()
+        prefs.edit().putString(sessionCacheKey(roomId), jsonArray.toString()).apply()
     }
 
-    override fun getSessionCache(): List<Session>? {
-        val json = prefs.getString("session_cache_json", null) ?: return null
-        return try {
-            val jsonArray = JSONArray(json)
-            val sessions = mutableListOf<Session>()
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                sessions.add(Session(
-                    id = obj.getString("id"),
-                    title = obj.getString("title"),
-                    lastMessage = obj.optString("lastMessage").ifEmpty { null },
-                    lastActivityTime = java.time.Instant.ofEpochMilli(obj.getLong("lastActivityTime")),
-                    replyCount = obj.getInt("replyCount"),
-                    unreadCount = obj.getInt("unreadCount"),
-                    isProcessing = obj.getBoolean("isProcessing"),
-                    senderAvatarUrl = obj.optString("senderAvatarUrl").ifEmpty { null },
-                    latestEventId = if (obj.has("latestEventId")) obj.getString("latestEventId") else null
-                ))
-            }
-            sessions
-        } catch (e: Exception) {
-            null
+    override fun getSessionCache(roomId: String): List<Session>? {
+        val json = migrateLegacySessionCache(prefs, roomId, getBoundRoomId()) ?: return null
+        return parseSessionCache(json)
+    }
+
+    private fun parseSessionCache(json: String): List<Session>? = try {
+        val jsonArray = JSONArray(json)
+        val sessions = mutableListOf<Session>()
+        for (i in 0 until jsonArray.length()) {
+            val obj = jsonArray.getJSONObject(i)
+            sessions.add(Session(
+                id = obj.getString("id"),
+                title = obj.getString("title"),
+                lastMessage = obj.optString("lastMessage").ifEmpty { null },
+                lastActivityTime = java.time.Instant.ofEpochMilli(obj.getLong("lastActivityTime")),
+                replyCount = obj.getInt("replyCount"),
+                unreadCount = obj.getInt("unreadCount"),
+                isProcessing = obj.getBoolean("isProcessing"),
+                senderAvatarUrl = obj.optString("senderAvatarUrl").ifEmpty { null },
+                latestEventId = if (obj.has("latestEventId")) obj.getString("latestEventId") else null
+            ))
         }
+        sessions
+    } catch (e: Exception) {
+        null
     }
 
     override fun getSessionTitle(threadRootId: String): String? {
@@ -156,6 +240,13 @@ class SettingsRepositoryImpl @Inject constructor(
             obj.put(k, v)
         }
         prefs.edit().putString("session_titles", obj.toString()).apply()
+    }
+
+    override fun saveProvisionalSessionTitle(roomId: String, threadRootId: String, rootBody: String) {
+        val provisional = buildProvisionalSession(threadRootId, rootBody, System.currentTimeMillis())
+            ?: return
+        val updated = upsertProvisionalSession(getSessionCache(roomId), provisional)
+        saveSessionCache(roomId, updated)
     }
 
     private val draftCache = java.util.concurrent.ConcurrentHashMap<String, String>()

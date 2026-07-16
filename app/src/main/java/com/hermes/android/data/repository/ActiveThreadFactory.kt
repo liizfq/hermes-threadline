@@ -13,11 +13,15 @@ import javax.inject.Inject
 /**
  * Factory that creates [ActiveThreadImpl] instances. Injected into [SessionRepository]
  * so it can open/close active thread handles on demand without being a singleton map.
+ *
+ * `open` to allow test fakes to substitute a controllable [ActiveThreadImpl]
+ * (built on [FakeTimeline] / [FakeRoom]) without going through the SDK
+ * `timelineWithConfiguration` path.
  */
-class ActiveThreadFactory @Inject constructor(
-    private val settingsRepository: SettingsRepository,
+open class ActiveThreadFactory @Inject constructor(
+    protected val settingsRepository: SettingsRepository,
 ) {
-    suspend fun create(room: Room, threadRootId: String): ActiveThreadImpl {
+    open suspend fun create(room: Room, threadRootId: String): ActiveThreadImpl {
         val timeline = withContext(Dispatchers.IO) {
             room.timelineWithConfiguration(
                 TimelineConfiguration(

@@ -50,7 +50,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.text.font.FontWeight
@@ -60,8 +59,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import com.hermes.android.data.repository.PaginationStatus
 import com.hermes.android.domain.model.Message
 import com.hermes.android.domain.model.MessageContent
@@ -146,26 +143,6 @@ fun ChatScreen(
             if (currentInputText.value.isNotBlank()) {
                 viewModel.updateDraft(currentInputText.value)
             }
-        }
-    }
-
-    // Page-lifecycle hook: enter on ON_RESUME, leave on dispose.
-    // DisposableEffect keys the observer to (lifecycleOwner, viewModel) so it
-    // re-registers on recomposition. No manual enter() when already RESUMED:
-    // LifecycleRegistry.addObserver() synchronously catches the new observer up to
-    // the current state, firing ON_RESUME if already RESUMED. Calling enter()
-    // manually on top of that would double-enter.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, viewModel) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.enter()
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            viewModel.leave()
         }
     }
 

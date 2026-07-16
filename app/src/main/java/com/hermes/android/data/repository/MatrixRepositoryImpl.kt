@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -52,6 +53,8 @@ class MatrixRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsRepository: SettingsRepository,
     private val sessionRepository: SessionRepository,
+    private val sessionListStore: RoomSessionListStore,
+    private val activeThreadStore: Lazy<ActiveThreadStore>,
     private val pushSettings: PushSettings
 ) : MatrixRepository, DefaultLifecycleObserver {
     private var client: Client? = null
@@ -104,9 +107,16 @@ class MatrixRepositoryImpl @Inject constructor(
                         ss.start()
                     }
                     Log.d(TAG, "SYNC_LIFECYCLE: start end")
-                    // refreshSessions runs OUTSIDE the mutex to avoid blocking stop.
+                    // Session list + active-thread catch-up run OUTSIDE the
+                    // mutex so they cannot block stop. Order: ThreadList
+                    // first (reconcile can then see the new latestEventId),
+                    // then focused timeline /relations refresh for the
+                    // currently open chat (if any).
                     sessionRepository.refreshSessions()
                     Log.d(TAG, "SYNC_LIFECYCLE: refreshSessions finished")
+                    // Lazy breaks MatrixRepository <-> ActiveThreadStore cycle.
+                    activeThreadStore.get().refreshActiveIfAny()
+                    Log.d(TAG, "SYNC_LIFECYCLE: refreshActiveIfAny finished")
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -204,8 +214,49 @@ class MatrixRepositoryImpl @Inject constructor(
                 Log.d(TAG, "Registered lifecycle observer for sync management")
             }
             registerPusher()
+            // Kick off the application-scoped session list for the bound room
+            // so the push pipeline and post-login UI have a snapshot ready
+            // without waiting for SessionList / Chat to open. Idempotent —
+            // SessionListViewModel's later ensureStarted for the same room is
+            // a NoOp.
+            maybeStartSessionStore(c)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start sync", e)
+        }
+    }
+
+    /**
+     * Idempotently bind the [RoomSessionListStore] to the bound room once the
+     * client is authenticated. The bound room may take a few seconds to
+     * materialize via sync, so retry briefly before giving up — at which point
+     * SessionListViewModel's ensureStarted remains as a fallback when the user
+     * opens the UI.
+     *
+     * The Room handle is dedicated to the store: on Start / Switch the store
+     * takes ownership (closes it on teardown); on NoOp (already started) the
+     * duplicate handle is closed here.
+     */
+    private fun maybeStartSessionStore(c: Client) {
+        val roomId = settingsRepository.getBoundRoomId() ?: return
+        scope.launch {
+            repeat(5) { attempt ->
+                try {
+                    val room = withContext(Dispatchers.IO) { c.getRoom(roomId) }
+                    if (room != null) {
+                        val tookOwnership = sessionListStore.ensureStarted(room, roomId)
+                        if (!tookOwnership) {
+                            try { room.close() } catch (_: Exception) {}
+                        }
+                        return@launch
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.d(TAG, "maybeStartSessionStore: attempt ${attempt + 1} failed: ${e.message}")
+                }
+                if (attempt < 4) delay(1000)
+            }
+            Log.w(TAG, "maybeStartSessionStore: room $roomId not available after 5 attempts")
         }
     }
 
@@ -408,6 +459,17 @@ class MatrixRepositoryImpl @Inject constructor(
         // Cancel any pending delayed-stop job so it won't race with us.
         stopSyncJob?.cancel()
         stopSyncJob = null
+
+        // Tear down the application-scoped session-list pipeline so the next
+        // login / restore can rebind cleanly to a (possibly different) room.
+        sessionListStore.shutdown()
+
+        // Tear down the application-scoped focused-thread timeline so the
+        // next login / restore reopens fresh; logout is one of the only paths
+        // (with switch-thread / switch-room / process death) that closes it.
+        // Lazy breaks the MatrixRepository -> ActiveThreadStore -> RoomRepository
+        // -> MatrixRepository DI cycle.
+        activeThreadStore.get().closeActive()
 
         try {
             // Serialize stop with lifecycle callbacks via the shared mutex.
