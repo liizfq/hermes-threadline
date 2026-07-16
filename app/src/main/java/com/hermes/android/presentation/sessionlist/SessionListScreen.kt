@@ -52,7 +52,7 @@ fun SessionListScreen(
                             )
                         )
                     } else {
-                        Text("Hermes Agent")
+                        Text("Hermes Threadline")
                     }
                 },
                 navigationIcon = {

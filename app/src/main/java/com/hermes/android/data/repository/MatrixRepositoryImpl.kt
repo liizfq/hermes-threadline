@@ -278,7 +278,7 @@ class MatrixRepositoryImpl @Inject constructor(
             }
             Log.d(TAG, "Client built, calling login...")
             withContext(Dispatchers.IO) {
-                c.login(username, password, null, "Hermes Android")
+                c.login(username, password, null, "Hermes Threadline")
             }
             Log.d(TAG, "Login successful!")
             client = c
@@ -384,7 +384,7 @@ class MatrixRepositoryImpl @Inject constructor(
                     c.setPusher(
                         identifiers = identifiers,
                         kind = kind,
-                        appDisplayName = "Hermes Android",
+                        appDisplayName = "Hermes Threadline",
                         deviceDisplayName = "",
                         profileTag = "",
                         lang = "zh-CN",

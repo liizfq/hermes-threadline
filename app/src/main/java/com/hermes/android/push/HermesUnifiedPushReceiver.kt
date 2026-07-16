@@ -85,7 +85,7 @@ class HermesUnifiedPushReceiver : MessagingReceiver() {
                     c.setPusher(
                         identifiers = identifiers,
                         kind = kind,
-                        appDisplayName = "Hermes Android",
+                        appDisplayName = "Hermes Threadline",
                         deviceDisplayName = "",
                         profileTag = "",
                         lang = com.hermes.android.ui.settings.LocaleManager.currentLocale(),
