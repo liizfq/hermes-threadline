@@ -20,6 +20,16 @@ fun RichMessageContent(
                         html = segment.html,
                         plainText = segment.plainText,
                         modifier = Modifier,
+                        isListBlock = segment.isListBlock,
+                    )
+                }
+                is MessageSegment.Heading -> {
+                    HtmlText(
+                        html = segment.html,
+                        plainText = segment.plainText,
+                        modifier = Modifier,
+                        fontSizeMultiplier = headingFontSizeMultiplier(segment.level),
+                        forceBold = true,
                     )
                 }
                 is MessageSegment.Table -> {
@@ -40,4 +50,14 @@ fun RichMessageContent(
             }
         }
     }
+}
+
+private fun headingFontSizeMultiplier(level: Int): Float = when (level) {
+    1 -> 1.40f
+    2 -> 1.30f
+    3 -> 1.20f
+    4 -> 1.15f
+    5 -> 1.10f
+    6 -> 1.05f
+    else -> 1.0f
 }

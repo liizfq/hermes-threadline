@@ -1,8 +1,11 @@
 package com.hermes.android.ui.components
 
 import android.content.Context
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
@@ -10,6 +13,8 @@ import android.widget.TextView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import io.element.android.wysiwyg.EditorStyledTextView
 import io.element.android.wysiwyg.compose.CodeBackgroundStyle
@@ -18,6 +23,8 @@ import io.element.android.wysiwyg.display.MentionDisplayHandler
 import io.element.android.wysiwyg.display.TextDisplay
 import io.element.android.wysiwyg.link.Link
 import io.element.android.wysiwyg.view.BulletListStyleConfig
+import io.element.android.wysiwyg.view.spans.OrderedListSpan
+import io.element.android.wysiwyg.view.spans.UnorderedListSpan
 import io.element.android.wysiwyg.view.CodeBlockStyleConfig
 import io.element.android.wysiwyg.view.InlineCodeStyleConfig
 import io.element.android.wysiwyg.view.PillStyleConfig
@@ -53,10 +60,13 @@ fun HtmlText(
     plainText: String,
     modifier: Modifier = Modifier,
     onLinkClick: ((String) -> Unit)? = null,
+    fontSizeMultiplier: Float = 1f,
+    forceBold: Boolean = false,
+    isListBlock: Boolean = false,
 ) {
     val (provider, style) = rememberHtmlConverterProvider()
 
-    val text = remember(html, plainText, provider, style) {
+    val rawText = remember(html, plainText, provider, style) {
         if (html != null) {
             try {
                 provider.getConverter(style).fromHtmlToSpans(html)
@@ -66,6 +76,17 @@ fun HtmlText(
         } else {
             plainText
         }
+    }
+
+    // For list blocks, trim only the leading/trailing newlines introduced by
+    // the converter's block-element handling. Additionally, compress the
+    // pure-`\n` gap between adjacent OrderedListSpan / UnorderedListSpan
+    // siblings (the converter emits `\n\n` between non-first `<li>`s) so
+    // list items render on consecutive lines instead of with blank gaps.
+    // `<br><br>` inside a paragraph run, nested-list spans, and non-list
+    // segments are all left untouched.
+    val text = remember(rawText, isListBlock) {
+        if (isListBlock) trimListSpacing(rawText) else rawText
     }
 
     AndroidView(
@@ -85,7 +106,7 @@ fun HtmlText(
                 // ── 1b. Apply text style (font size, colour, line height) ──
                 // EditorStyledText composable does this via applyStyleInCompose(),
                 // which is internal. We replicate the essential calls here.
-                applyTextStyle(style)
+                applyTextStyle(style, fontSizeMultiplier, forceBold)
 
                 // ── 2. Replace the gesture-stealing GestureDetector ──
                 runCatching {
@@ -206,11 +227,111 @@ fun HtmlText(
                     "layoutW=${newLayout?.width ?: -1}, layoutH=${newLayout?.height ?: -1}, " +
                     "lineCount=${newLayout?.lineCount ?: -1})")
             }
+            // Re-apply text style on every update so slot reuse with new
+            // fontSizeMultiplier / forceBold values keeps the view in sync.
+            // Cheap and idempotent.
+            tv.applyTextStyle(style, fontSizeMultiplier, forceBold)
+
             tv.onLinkClickedListener = onLinkClick?.let { cb ->
                 { link: Link -> cb(link.url); Unit }
             }
         },
     )
+}
+
+/**
+ * Post-processes a [CharSequence] produced for a list block (`<ul>`/`<ol>`):
+ *
+ * 1. Trim only the leading/trailing `\n` characters introduced by the
+ *    converter's block-element handling. Internal spans (bullets, numbers,
+ *    indents) are preserved by slicing via [SpannableStringBuilder], which
+ *    keeps spans that fall within the retained range.
+ *
+ * 2. Compress the pure-`\n` gap between adjacent sibling list spans.
+ *    StyledHtmlConverter (isEditor=false) emits `\n\n` before every non-first
+ *    `<li>` *outside* the li span's range, so consecutive
+ *    [OrderedListSpan]/[UnorderedListSpan] siblings end up with a two-char
+ *    `\n` gap that renders as a blank line. We collapse such gaps to a single
+ *    `\n`. Gaps of any other shape (non-`\n` content, length ≤ 1) and gaps
+ *    between overlapping nested spans are left alone.
+ *
+ * If [text] is not a [Spanned] (e.g. conversion threw and we fell back to
+ * plain text), only step 1 is applied — no global `\n\n` replacement.
+ */
+private fun trimListSpacing(text: CharSequence): CharSequence {
+    val trimmed = trimNewlineBoundaries(text)
+    if (trimmed !is Spanned) return trimmed
+    val ssb = if (trimmed is SpannableStringBuilder) {
+        trimmed
+    } else {
+        SpannableStringBuilder(trimmed)
+    }
+
+    // Collect both list-span types, then sort by start (then end) so we can
+    // walk sibling boundaries in document order. Triple = (span, start, end).
+    val spans = (
+        ssb.getSpans(0, ssb.length, OrderedListSpan::class.java).toList() +
+            ssb.getSpans(0, ssb.length, UnorderedListSpan::class.java).toList()
+        )
+        .map { Triple(it, ssb.getSpanStart(it), ssb.getSpanEnd(it)) }
+        .filter { (_, start, end) -> start >= 0 && end >= 0 }
+        .sortedWith(compareBy({ it.second }, { it.third }))
+
+    // Walk spans and record deletions for pure-`\n` gaps between adjacent
+    // siblings. `prevEnd` tracks the furthest end seen so far so that a
+    // nested span contained inside an outer span is not treated as a sibling
+    // (its start ≤ prevEnd, so the gap check is skipped).
+    data class Del(val start: Int, val count: Int)
+    val dels = mutableListOf<Del>()
+    var prevEnd = Int.MIN_VALUE
+    for ((_, start, end) in spans) {
+        if (prevEnd >= 0 && start > prevEnd) {
+            val gapLen = start - prevEnd
+            if (gapLen > 1) {
+                var allNewline = true
+                for (i in prevEnd until start) {
+                    if (ssb[i] != '\n') {
+                        allNewline = false
+                        break
+                    }
+                }
+                if (allNewline) {
+                    // Keep one `\n` at prevEnd, delete the remaining
+                    // (gapLen - 1) chars that follow it.
+                    dels += Del(prevEnd + 1, gapLen - 1)
+                }
+            }
+        }
+        if (end > prevEnd) prevEnd = end
+    }
+
+    // Apply deletions back-to-front so earlier indices stay valid.
+    // SpannableStringBuilder.delete shifts/clamps span ranges automatically.
+    for (d in dels.sortedByDescending { it.start }) {
+        ssb.delete(d.start, d.start + d.count)
+    }
+    return ssb
+}
+
+/**
+ * Trims only the leading and trailing `\n` characters from a list-block
+ * [CharSequence]. Internal newlines and spans are preserved by slicing via
+ * [SpannableStringBuilder], which keeps spans that fall within the retained
+ * range.
+ */
+private fun trimNewlineBoundaries(text: CharSequence): CharSequence {
+    val len = text.length
+    if (len == 0) return text
+    var start = 0
+    while (start < len && text[start] == '\n') start++
+    if (start == len) return ""
+    var end = len
+    while (end > start && text[end - 1] == '\n') end--
+    if (start == 0 && end == len) return text
+    return when (text) {
+        is Spanned -> SpannableStringBuilder(text, start, end)
+        else -> text.subSequence(start, end)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -255,40 +376,40 @@ private fun buildStyleConfig(
 /**
  * Replicates the essential parts of the library's internal
  * `RichTextEditorStyleExtKt.applyStyleInCompose()`:
- * - font size
+ * - font size (scaled by [fontSizeMultiplier] for headings)
  * - text colour
  * - line height
  * - include font padding
+ * - bold typeface when [forceBold] is set (used by [MessageSegment.Heading])
+ *
+ * The multiplier applies on top of the global [com.hermes.android.ui.settings.LocalChatFontScale]
+ * baked into [style]; passing `1f` leaves all existing behaviour unchanged.
  */
-private fun EditorStyledTextView.applyTextStyle(style: RichTextEditorStyle) {
+private fun EditorStyledTextView.applyTextStyle(
+    style: RichTextEditorStyle,
+    fontSizeMultiplier: Float = 1f,
+    forceBold: Boolean = false,
+) {
     val ts = style.text
     // includeFontPadding
     ts.runCatching { javaClass.getMethod("getIncludeFontPadding").invoke(this) as Boolean }
         .onSuccess { includeFontPadding = it }
-    // text colour (Compose Color long → argb int)
+    // text colour (Compose Color packed raw value → Android ARGB int).
+    // Color(Long) resolves to the top-level ARGB factory and re-encodes the
+    // already-packed raw value; going through ULong selects the value-class
+    // constructor so toArgb() reads the packed sRGB value directly.
     runCatching {
         val colorLong = ts.callLong("getColor-0d7_KjU")
-        // Compose Color(long).toArgb() — use reflection on Color companion
-        val colorObj = androidx.compose.ui.graphics.Color(colorLong)
-        val toArgbMethod = androidx.compose.ui.graphics.Color::class.java
-            .getMethod("component1") // Color.toArgb() is internal; use known conversion
-        // Actually Color(long) stores the argb value directly as the long's bits.
-        // The simplest reliable approach: the Color constructor accepts a long
-        // whose value IS the packed ARGB. We can extract it directly.
-        setTextColor(colorLong.toInt())
+        setTextColor(Color(colorLong.toULong()).toArgb())
     }
-    // font size (TextUnit → sp float)
+    // font size (TextUnit → sp float) × multiplier
     runCatching {
         val fontSizeLong = ts.callLong("getFontSize-XSAIIZE")
-        // TextUnit.getValue() — extract the raw float via reflection
-        val tuClass = Class.forName("androidx.compose.ui.unit.TextUnit")
-        val companion = tuClass.getDeclaredField("Companion").get(null)
-        // The getValue method is internal — but TextUnit is an inline ULong class.
-        // The long encodes (type << 32 | value). Lower 32 bits = the float bits.
         val floatBits = fontSizeLong.toInt()
         val fontSizeSp = Float.fromBits(floatBits)
         if (fontSizeSp > 0f) {
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+            val scaled = if (fontSizeMultiplier > 0f) fontSizeSp * fontSizeMultiplier else fontSizeSp
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, scaled)
         }
     }
     // line height (only if specified)
@@ -300,13 +421,17 @@ private fun EditorStyledTextView.applyTextStyle(style: RichTextEditorStyle) {
             val lhSp = Float.fromBits(valBits)
             if (lhSp > 0f) {
                 val density = context.resources.displayMetrics.density
-                val lineHeightPx = (lhSp * density).toInt()
+                val scaledLh = if (fontSizeMultiplier > 0f) lhSp * fontSizeMultiplier else lhSp
+                val lineHeightPx = (scaledLh * density).toInt()
                 if (android.os.Build.VERSION.SDK_INT >= 28) {
                     setLineHeight(lineHeightPx)
                 }
             }
         }
     }
+    // Bold typeface for headings — applies to the whole run. Inline formatting
+    // spans (e.g. <strong>, <em>) still take precedence on their own ranges.
+    typeface = if (forceBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
 }
 
 // ── CodeBackgroundStyle → Drawable ────────────────────────────────────────

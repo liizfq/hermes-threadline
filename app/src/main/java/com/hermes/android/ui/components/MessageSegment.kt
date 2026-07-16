@@ -4,6 +4,13 @@ sealed interface MessageSegment {
     data class Text(
         val html: String?,
         val plainText: String,
+        val isListBlock: Boolean = false,
+    ) : MessageSegment
+
+    data class Heading(
+        val html: String,
+        val plainText: String,
+        val level: Int,
     ) : MessageSegment
 
     data class Thinking(

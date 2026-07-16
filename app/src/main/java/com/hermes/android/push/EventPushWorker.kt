@@ -15,6 +15,7 @@ import androidx.work.WorkerParameters
 import com.hermes.android.MainActivity
 import com.hermes.android.R
 import com.hermes.android.data.repository.MatrixRepository
+import com.hermes.android.data.repository.SettingsRepository
 import com.hermes.android.ui.settings.LocaleManager
 import com.hermes.android.ui.settings.strEnZh
 import dagger.assisted.Assisted
@@ -43,6 +44,7 @@ class EventPushWorker @AssistedInject constructor(
     @Assisted params: WorkerParameters,
     private val matrixRepository: MatrixRepository,
     private val pushEventStore: PushEventStore,
+    private val settingsRepository: SettingsRepository,
 ) : CoroutineWorker(appContext, params) {
 
     private val notificationManager =
@@ -55,20 +57,16 @@ class EventPushWorker @AssistedInject constructor(
 
         if (events.isEmpty()) return Result.success()
 
-        // Group events by roomId → single bundled notification per room.
-        val byRoom = events.groupBy { it.roomId }
+        // Resolve before grouping because event_id-only payloads may omit the thread root.
+        val resolvedEvents = events.map { event -> resolveEvent(event) ?: event }
+        // Keep one notification per room + thread root. Different threads must not overwrite.
+        val byThread = resolvedEvents.groupBy { event ->
+            event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
+        }
 
-        for ((roomId, roomEvents) in byRoom) {
-            val notificationId = roomId.hashCode().and(0x7FFFFFFF)
-            val count = roomEvents.size
-            val latest = roomEvents.last()
-
-            // Resolve via SDK when possible, so event_id_only payloads still
-            // show the sender+body. Falls back to the payload fields if the
-            // SDK lookup fails (no client, network, redaction, etc.).
-            val resolved = resolveEvent(latest)
-
-            showNotification(notificationId, resolved ?: latest, count)
+        for ((key, threadEvents) in byThread) {
+            val notificationId = stableNotificationId(key.first, key.second)
+            showNotification(notificationId, threadEvents.last(), threadEvents.size)
         }
 
         return Result.success()
@@ -112,8 +110,11 @@ class EventPushWorker @AssistedInject constructor(
 
     private fun showNotification(notificationId: Int, latest: EventPushEvent, count: Int) {
         val locale = LocaleManager.currentLocale()
-        val sender = latest.sender ?: ""
-        val roomName = latest.roomId
+        val threadRootId = latest.threadRootId?.takeIf { it.isNotBlank() } ?: latest.eventId
+        val threadTitle = settingsRepository.getSessionTitle(threadRootId)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: threadRootId
         val fullBody = latest.body?.take(200) ?: ""
 
         val displayBody = when (latest.msgType) {
@@ -123,7 +124,6 @@ class EventPushWorker @AssistedInject constructor(
             else -> fullBody
         }
 
-        val threadRootId = latest.threadRootId ?: latest.eventId
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(MainActivity.EXTRA_NAVIGATE_TO_THREAD, threadRootId)
@@ -135,7 +135,8 @@ class EventPushWorker @AssistedInject constructor(
 
         val notification = NotificationCompat.Builder(applicationContext, "hermes_messages")
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(sender.ifBlank { roomName })
+            // The notification represents the conversation thread, not the sender ID.
+            .setContentTitle(threadTitle)
             .setContentText(displayBody)
             .setStyle(NotificationCompat.BigTextStyle().bigText(displayBody))
             .setAutoCancel(true)
@@ -145,7 +146,13 @@ class EventPushWorker @AssistedInject constructor(
             .setNumber(count)
 
         notificationManager.notify(notificationId, notification.build())
-        Log.d(TAG, "Notification shown: id=$notificationId count=$count sender=$sender")
+        Log.d(TAG, "Notification shown: id=$notificationId count=$count threadRoot=$threadRootId")
+    }
+
+    private fun stableNotificationId(roomId: String, threadRootId: String): Int {
+        var hash = 17
+        for (ch in "$roomId:$threadRootId") hash = hash * 31 + ch.code
+        return hash and 0x7FFFFFFF
     }
 
     companion object {
