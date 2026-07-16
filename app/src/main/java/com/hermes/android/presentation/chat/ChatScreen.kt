@@ -363,8 +363,26 @@ fun ChatScreen(
                     }
                     } // PullToLoadHistory
 
-                    // TimelineLag 提示条：ThreadList 与 ActiveThread lastEventId 不一致时
-                    if (timelineLag != null) {
+                    // TimelineLag 提示条：ThreadList 与 ActiveThread 不一致时
+                    val currentLag = timelineLag
+                    if (currentLag != null) {
+                        val lagHint = when (currentLag.direction) {
+                            LagDirection.ChatBehind ->
+                                strEnZh(
+                                    "Thread list is ahead; catching up chat…",
+                                    "列表更新于聊天，正在同步时间线…"
+                                )
+                            LagDirection.SessionListBehind ->
+                                strEnZh(
+                                    "Chat is ahead; refreshing session list…",
+                                    "聊天新于列表，正在刷新会话列表…"
+                                )
+                            null ->
+                                strEnZh(
+                                    "List and thread timeline out of sync",
+                                    "列表与线程时间线可能未对齐"
+                                )
+                        }
                         Surface(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
@@ -375,13 +393,16 @@ fun ChatScreen(
                         ) {
                             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
                                 Text(
-                                    strEnZh("List updated; thread timeline may be out of sync", "列表已有更新，线程时间线可能未对齐"),
+                                    lagHint,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Medium,
                                     color = MaterialTheme.colorScheme.onErrorContainer
                                 )
                                 Text(
-                                    strEnZh("ThreadList latest eventId does not match current timeline", "ThreadList 与当前时间线最新 eventId 不一致"),
+                                    strEnZh(
+                                        "ThreadList latest eventId does not match current timeline",
+                                        "ThreadList 与当前时间线最新 eventId 不一致"
+                                    ),
                                     fontSize = 10.sp,
                                     color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
                                 )

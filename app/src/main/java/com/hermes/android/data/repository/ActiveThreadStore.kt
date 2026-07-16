@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import com.hermes.android.domain.model.Message
 import com.hermes.android.presentation.UiState
+import com.hermes.android.presentation.chat.LagDirection
 import com.hermes.android.presentation.chat.TimelineLag
 import com.hermes.android.presentation.chat.computeTimelineLag
 import kotlinx.coroutines.CancellationException
@@ -438,49 +439,79 @@ class ActiveThreadStore internal constructor(
             }
         }
 
-        // Reconcile: ThreadList latest vs ActiveThread last; auto-refresh on lag.
-        // Single-flight per mismatch key so a sticky lag does not spam
-        // room.refreshThread on every combine emission.
+        // Reconcile: ThreadList latest vs ActiveThread messages.
+        // Direction from membership of listLatest in the chat message list:
+        //  - listLatest NOT in chat  → ChatBehind  → refreshThread (/relations)
+        //  - listLatest IN chat      → SessionListBehind → refreshSessions once
+        // Same mismatch key is single-flight either direction.
         h.scope.launch {
             combine(
-                thread.messages.map { msgs -> msgs.lastOrNull()?.id },
+                thread.messages.map { msgs ->
+                    msgs.map { it.id } to (msgs.lastOrNull()?.id)
+                },
                 sessionRepository.observeSessions().map { sessions ->
                     sessions.firstOrNull { it.id == h.key.threadRootId }?.latestEventId
                 }
-            ) { threadLast, listLatest ->
-                computeTimelineLag(listLatest, threadLast)
+            ) { (messageIds, threadLast), listLatest ->
+                computeTimelineLag(listLatest, threadLast, messageIds)
             }.collect { lag ->
                 if (h.closed) return@collect
                 updateState(h) { it.copy(timelineLag = lag) }
                 if (lag == null) {
-                    // Caught up — allow a future mismatch to refresh again.
                     h.lastRefreshedMismatch = null
                     return@collect
                 }
                 if (!thread.isActive) return@collect
-                val mismatchKey = lag.listLatestEventId to (lag.threadLastEventId ?: "")
+                val mismatchKey =
+                    "${lag.direction}|${lag.listLatestEventId}|${lag.threadLastEventId ?: ""}"
                 if (mismatchKey == h.lastRefreshedMismatch) {
-                    Log.d(TAG, "reconcile[${h.key}]: same mismatch already refreshed, skip")
+                    Log.d(TAG, "reconcile[${h.key}]: same mismatch already handled, skip")
                     return@collect
                 }
-                // Claim before await so concurrent emissions of the same pair
-                // do not schedule a second /relations.
                 h.lastRefreshedMismatch = mismatchKey
-                Log.d(TAG, "reconcile[${h.key}]: lag detected, refreshing via /relations")
-                try {
-                    thread.refresh()
-                } catch (e: CancellationException) {
-                    // Allow retry after cancellation (scope teardown or switch).
-                    if (h.lastRefreshedMismatch == mismatchKey) {
-                        h.lastRefreshedMismatch = null
+                when (lag.direction) {
+                    LagDirection.ChatBehind, null -> {
+                        // Chat missing listLatest (or unknown): pull thread tail.
+                        Log.d(
+                            TAG,
+                            "reconcile[${h.key}]: ChatBehind list=${lag.listLatestEventId} " +
+                                "threadLast=${lag.threadLastEventId} → refreshThread"
+                        )
+                        try {
+                            thread.refresh()
+                        } catch (e: CancellationException) {
+                            if (h.lastRefreshedMismatch == mismatchKey) {
+                                h.lastRefreshedMismatch = null
+                            }
+                            throw e
+                        } catch (e: Exception) {
+                            if (h.lastRefreshedMismatch == mismatchKey) {
+                                h.lastRefreshedMismatch = null
+                            }
+                            Log.e(TAG, "reconcile[${h.key}]: refreshThread failed", e)
+                        }
                     }
-                    throw e
-                } catch (e: Exception) {
-                    // Failure: clear claim so a later list change / open can retry.
-                    if (h.lastRefreshedMismatch == mismatchKey) {
-                        h.lastRefreshedMismatch = null
+                    LagDirection.SessionListBehind -> {
+                        // Chat already has listLatest (not as last) — ThreadList summary stale.
+                        Log.d(
+                            TAG,
+                            "reconcile[${h.key}]: SessionListBehind list=${lag.listLatestEventId} " +
+                                "threadLast=${lag.threadLastEventId} → refreshSessions"
+                        )
+                        try {
+                            sessionRepository.refreshSessions()
+                        } catch (e: CancellationException) {
+                            if (h.lastRefreshedMismatch == mismatchKey) {
+                                h.lastRefreshedMismatch = null
+                            }
+                            throw e
+                        } catch (e: Exception) {
+                            if (h.lastRefreshedMismatch == mismatchKey) {
+                                h.lastRefreshedMismatch = null
+                            }
+                            Log.e(TAG, "reconcile[${h.key}]: refreshSessions failed", e)
+                        }
                     }
-                    Log.e(TAG, "reconcile[${h.key}]: refresh failed", e)
                 }
             }
         }
@@ -558,11 +589,10 @@ class ActiveThreadStore internal constructor(
         val refreshInFlight: AtomicBoolean = AtomicBoolean(false)
 
         /**
-         * Last mismatch pair we already ran `/relations` for:
-         * `(listLatestEventId, threadLastEventId)`. Cleared when lag goes null
-         * so a new gap can refresh again. Not a map — only the current pair.
+         * Last handled mismatch key: `"$direction|$listLatest|$threadLast"`.
+         * Cleared when lag is null so a new gap can be handled again.
          */
-        @Volatile var lastRefreshedMismatch: Pair<String, String>? = null
+        @Volatile var lastRefreshedMismatch: String? = null
 
         fun markClosed() { _closed = true }
     }

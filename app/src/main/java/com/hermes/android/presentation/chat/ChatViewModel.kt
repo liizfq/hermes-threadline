@@ -28,27 +28,74 @@ import javax.inject.Inject
 
 private const val TAG = "ChatVM"
 
-/** Reconcile result: triggered when ThreadList latest and ActiveThread last are out of sync. */
+/** Reconcile result when ThreadList latest and ActiveThread last differ. */
 data class TimelineLag(
     val listLatestEventId: String,
     val threadLastEventId: String?,
+    /**
+     * Which side is behind, when we can tell from membership of
+     * [listLatestEventId] in the focused chat message list.
+     * Null = mismatch only (legacy / unknown direction).
+     */
+    val direction: LagDirection? = null,
 )
 
 /**
- * Pure helper: returns null when the ThreadList and ActiveThread last eventId
- * are both empty / equal, or a [TimelineLag] when both are non-empty and differ.
- * No external dependencies — easy to unit test.
+ * Direction of a ThreadList ↔ focused-timeline mismatch.
+ *
+ * - [ChatBehind]: ThreadList's latest event is **not** in the chat message
+ *   list — chat is missing a tail event → refresh thread (`/relations`).
+ * - [SessionListBehind]: ThreadList's latest event **is** already in the chat
+ *   list (and is not the last message) — SessionList summary is stale →
+ *   refresh ThreadList once.
+ */
+enum class LagDirection {
+    ChatBehind,
+    SessionListBehind,
+}
+
+/**
+ * Pure helper for ThreadList latest vs focused-timeline last.
+ *
+ * Without message membership we only know "unequal ids" (direction = null).
+ * With [threadMessageIds] (or full message list last-id check via
+ * [listLatestInThreadMessages]):
+ *  - listLatest not in chat → [LagDirection.ChatBehind]
+ *  - listLatest in chat and != threadLast → [LagDirection.SessionListBehind]
+ *  - equal / empty → null (in sync or not enough data)
  */
 internal fun computeTimelineLag(
     listLatestEventId: String?,
     threadLastEventId: String?,
+    listLatestInThreadMessages: Boolean? = null,
 ): TimelineLag? {
     if (listLatestEventId.isNullOrEmpty() || threadLastEventId.isNullOrEmpty()) return null
     if (listLatestEventId == threadLastEventId) return null
+    val direction = when (listLatestInThreadMessages) {
+        false -> LagDirection.ChatBehind
+        true -> LagDirection.SessionListBehind
+        null -> null
+    }
     return TimelineLag(
         listLatestEventId = listLatestEventId,
         threadLastEventId = threadLastEventId,
+        direction = direction,
     )
+}
+
+/**
+ * Convenience: compute lag using the set of event ids currently visible in
+ * the focused chat. Prefer this over the 2-arg form when messages are available.
+ */
+internal fun computeTimelineLag(
+    listLatestEventId: String?,
+    threadLastEventId: String?,
+    threadMessageIds: Collection<String>,
+): TimelineLag? {
+    if (listLatestEventId.isNullOrEmpty() || threadLastEventId.isNullOrEmpty()) return null
+    if (listLatestEventId == threadLastEventId) return null
+    val inChat = listLatestEventId in threadMessageIds
+    return computeTimelineLag(listLatestEventId, threadLastEventId, listLatestInThreadMessages = inChat)
 }
 
 /**
