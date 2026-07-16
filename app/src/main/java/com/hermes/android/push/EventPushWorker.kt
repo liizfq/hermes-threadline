@@ -14,6 +14,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.hermes.android.MainActivity
 import com.hermes.android.R
+import com.hermes.android.data.repository.ActiveThreadStore
 import com.hermes.android.data.repository.MatrixRepository
 import com.hermes.android.data.repository.SessionRepository
 import com.hermes.android.data.repository.SettingsRepository
@@ -95,6 +96,7 @@ class EventPushWorker @AssistedInject constructor(
     private val pushEventStore: PushEventStore,
     private val settingsRepository: SettingsRepository,
     private val sessionRepository: SessionRepository,
+    private val activeThreadStore: ActiveThreadStore,
 ) : CoroutineWorker(appContext, params) {
 
     private val notificationManager =
@@ -119,13 +121,29 @@ class EventPushWorker @AssistedInject constructor(
         // Awaits each shared refresh so this round's title resolution sees the
         // refreshed snapshot / cache.
         val boundRoomId = settingsRepository.getBoundRoomId()
+        val activeKey = activeThreadStore.activeKey()
+        var activeThreadHit = false
         if (boundRoomId != null) {
             for ((key, _) in byThread) {
                 val eventRoomId = key.first
                 val threadRootId = key.second
                 if (eventRoomId == boundRoomId) {
                     sessionRepository.refreshIfMissing(boundRoomId, threadRootId)
+                    // If the user is currently focused on this thread (app in
+                    // foreground or timeline still warm in background), fill
+                    // the focused TEC gap via /relations. Does NOT open a new
+                    // focused timeline for push-only threads.
+                    if (activeKey != null &&
+                        activeKey.roomId == boundRoomId &&
+                        activeKey.threadRootId == threadRootId
+                    ) {
+                        activeThreadHit = true
+                    }
                 }
+            }
+            if (activeThreadHit) {
+                Log.d(TAG, "doWork: push hits active thread $activeKey, catch-up refresh")
+                activeThreadStore.refreshActiveIfAny()
             }
         }
 

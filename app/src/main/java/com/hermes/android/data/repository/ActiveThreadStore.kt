@@ -147,19 +147,22 @@ class ActiveThreadStore internal constructor(
     /**
      * Open or reuse the focused thread for [roomId]/[threadRootId].
      *
-     * Same key as the current holder (and not closed): synchronous no-op.
-     * Different / null: dispatches an async setup on [storeScope]; the actual
-     * close-and-replace happens inside [setupHolder] so concurrent opens
-     * serialize.
+     * Same key as the current holder (and not closed): do **not** rebuild the
+     * timeline, but still schedule a single `/relations` catch-up so re-entering
+     * the same session after background can pull events that arrived while
+     * SyncService was stopped. Different key: async setup via [setupHolder].
      */
     fun open(roomId: String, threadRootId: String) {
         val key = ActiveThreadKey(roomId, threadRootId)
-        synchronized(stateLock) {
+        val reuse = synchronized(stateLock) {
             val current = holder
-            if (current != null && current.key == key && !current.closed) {
-                Log.d(TAG, "open: reuse $key")
-                return
-            }
+            current != null && current.key == key && !current.closed
+        }
+        if (reuse) {
+            Log.d(TAG, "open: reuse $key (catch-up refresh)")
+            // Re-entry after leave/background: keep warm timeline, fill tail gap.
+            storeScope.launch { refreshActiveIfAny() }
+            return
         }
         Log.d(TAG, "open: dispatching setup for $key")
         storeScope.launch { setupHolder(key) }
@@ -436,6 +439,8 @@ class ActiveThreadStore internal constructor(
         }
 
         // Reconcile: ThreadList latest vs ActiveThread last; auto-refresh on lag.
+        // Single-flight per mismatch key so a sticky lag does not spam
+        // room.refreshThread on every combine emission.
         h.scope.launch {
             combine(
                 thread.messages.map { msgs -> msgs.lastOrNull()?.id },
@@ -447,9 +452,35 @@ class ActiveThreadStore internal constructor(
             }.collect { lag ->
                 if (h.closed) return@collect
                 updateState(h) { it.copy(timelineLag = lag) }
-                if (lag != null && thread.isActive) {
-                    Log.d(TAG, "reconcile[${h.key}]: lag detected, refreshing via /relations")
+                if (lag == null) {
+                    // Caught up — allow a future mismatch to refresh again.
+                    h.lastRefreshedMismatch = null
+                    return@collect
+                }
+                if (!thread.isActive) return@collect
+                val mismatchKey = lag.listLatestEventId to (lag.threadLastEventId ?: "")
+                if (mismatchKey == h.lastRefreshedMismatch) {
+                    Log.d(TAG, "reconcile[${h.key}]: same mismatch already refreshed, skip")
+                    return@collect
+                }
+                // Claim before await so concurrent emissions of the same pair
+                // do not schedule a second /relations.
+                h.lastRefreshedMismatch = mismatchKey
+                Log.d(TAG, "reconcile[${h.key}]: lag detected, refreshing via /relations")
+                try {
                     thread.refresh()
+                } catch (e: CancellationException) {
+                    // Allow retry after cancellation (scope teardown or switch).
+                    if (h.lastRefreshedMismatch == mismatchKey) {
+                        h.lastRefreshedMismatch = null
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    // Failure: clear claim so a later list change / open can retry.
+                    if (h.lastRefreshedMismatch == mismatchKey) {
+                        h.lastRefreshedMismatch = null
+                    }
+                    Log.e(TAG, "reconcile[${h.key}]: refresh failed", e)
                 }
             }
         }
@@ -525,6 +556,13 @@ class ActiveThreadStore internal constructor(
 
         /** Coalesces concurrent [refreshActiveIfAny] calls on this holder. */
         val refreshInFlight: AtomicBoolean = AtomicBoolean(false)
+
+        /**
+         * Last mismatch pair we already ran `/relations` for:
+         * `(listLatestEventId, threadLastEventId)`. Cleared when lag goes null
+         * so a new gap can refresh again. Not a map — only the current pair.
+         */
+        @Volatile var lastRefreshedMismatch: Pair<String, String>? = null
 
         fun markClosed() { _closed = true }
     }

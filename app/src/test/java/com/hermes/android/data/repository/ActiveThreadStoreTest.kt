@@ -97,7 +97,6 @@ class ActiveThreadStoreTest {
         roomRepo.setRoom(ROOM_A, TestRoom(ROOM_A))
         store.open(ROOM_A, THREAD_A)
         yieldUntil { store.activeKey() == ActiveThreadKey(ROOM_A, THREAD_A) }
-        val firstSnapshot = store.state.value
         val createsBefore = factory.createCount.get()
 
         store.open(ROOM_A, THREAD_A)
@@ -105,7 +104,22 @@ class ActiveThreadStoreTest {
         Thread.sleep(50)
 
         assertEquals(createsBefore, factory.createCount.get(), "second open same key must not call create again")
-        assertEquals(firstSnapshot, store.state.value, "no-op open must not perturb state")
+        assertEquals(ActiveThreadKey(ROOM_A, THREAD_A), store.activeKey(), "reuse must keep the same active key")
+        // Same-key open schedules a catch-up refresh but must not rebuild.
+    }
+
+    @Test
+    fun `same-key second open does not tear down room handle`() = runBlocking {
+        val room = TestRoom(ROOM_A)
+        roomRepo.setRoom(ROOM_A, room)
+        store.open(ROOM_A, THREAD_A)
+        yieldUntil { store.activeKey() == ActiveThreadKey(ROOM_A, THREAD_A) }
+
+        store.open(ROOM_A, THREAD_A)
+        Thread.sleep(50)
+
+        assertEquals(0, room.closeCount.get(), "reuse catch-up must not close the warm room handle")
+        assertEquals(1, factory.createCount.get())
     }
 
     @Test
