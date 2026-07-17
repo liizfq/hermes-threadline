@@ -1,114 +1,63 @@
 package com.hermes.android.ui.components
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.hermes.android.domain.model.MessageContent
 
-/**
- * Renders all text-like segments of a message inside a **single** [HtmlText]
- * (and therefore a single native [EditorStyledTextView]).
- *
- * Because every block is merged into one selectable text run, the user can
- * long-press and drag the selection handles across paragraphs, headings, lists,
- * tables and code blocks instead of being trapped inside one chunk.
- *
- * Tables and code blocks are converted to HTML; if the underlying wysiwyg
- * converter drops an unknown tag their text content still appears inline.
- */
 @Composable
 fun RichMessageContent(
     content: MessageContent.Text,
     modifier: Modifier = Modifier,
 ) {
-    val unified = rememberUnifiedText(content)
-    HtmlText(
-        html = unified.html,
-        plainText = unified.plainText,
-        modifier = modifier,
-    )
-}
-
-/** Cached conversion from segment list to one combined HTML document. */
-@Composable
-private fun rememberUnifiedText(content: MessageContent.Text): UnifiedText {
-    return androidx.compose.runtime.remember(content.segments, content.html, content.plainText) {
-        content.toUnifiedText()
-    }
-}
-
-private data class UnifiedText(
-    val html: String?,
-    val plainText: String,
-)
-
-private fun MessageContent.Text.toUnifiedText(): UnifiedText {
-    if (segments.isEmpty()) {
-        return UnifiedText(html = html, plainText = plainText)
-    }
-
-    val htmlOut = StringBuilder()
-    val plainOut = StringBuilder()
-
-    for (segment in segments) {
-        when (segment) {
-            is MessageSegment.Text -> {
-                if (!segment.html.isNullOrBlank()) {
-                    htmlOut.append(segment.html)
-                } else {
-                    htmlOut.append("<p>${escapeHtml(segment.plainText)}</p>")
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (segment in content.segments) {
+            when (segment) {
+                is MessageSegment.Text -> {
+                    HtmlText(
+                        html = segment.html,
+                        plainText = segment.plainText,
+                        modifier = Modifier,
+                        isListBlock = segment.isListBlock,
+                    )
                 }
-                plainOut.append(segment.plainText)
-            }
-            is MessageSegment.Heading -> {
-                htmlOut.append("<h${segment.level}>${segment.html}</h${segment.level}>")
-                plainOut.append(segment.plainText)
-            }
-            is MessageSegment.Table -> {
-                htmlOut.append(segment.toHtmlTable())
-                plainOut.append(segment.toPlainText())
-            }
-            is MessageSegment.CodeBlock -> {
-                val langAttr = segment.language?.let { " class=\"language-$it\"" } ?: ""
-                htmlOut.append("<pre><code$langAttr>${escapeHtml(segment.code)}</code></pre>")
-                plainOut.append(segment.code)
-            }
-            is MessageSegment.Thinking, is MessageSegment.ToolCall -> {
-                // Deprecated: no longer produced by the parser.
+                is MessageSegment.Heading -> {
+                    HtmlText(
+                        html = segment.html,
+                        plainText = segment.plainText,
+                        modifier = Modifier,
+                        fontSizeMultiplier = headingFontSizeMultiplier(segment.level),
+                        forceBold = true,
+                    )
+                }
+                is MessageSegment.Table -> {
+                    TableBlock(
+                        headers = segment.headers,
+                        rows = segment.rows,
+                        alignments = segment.alignments,
+                    )
+                }
+                is MessageSegment.CodeBlock -> {
+                    CodeBlockView(
+                        code = segment.code,
+                    )
+                }
+                is MessageSegment.Thinking, is MessageSegment.ToolCall -> {
+                    // Deprecated: emoji-based segments are no longer produced
+                }
             }
         }
     }
-
-    val combinedHtml = htmlOut.toString()
-    return UnifiedText(
-        html = combinedHtml.ifBlank { null },
-        plainText = plainOut.toString().ifBlank { plainText },
-    )
 }
 
-private fun MessageSegment.Table.toHtmlTable(): String = buildString {
-    append("<table>")
-    append("<tr>")
-    for (h in headers) append("<th>${escapeHtml(h)}</th>")
-    append("</tr>")
-    for (row in rows) {
-        append("<tr>")
-        for (cell in row) append("<td>${escapeHtml(cell)}</td>")
-        append("</tr>")
-    }
-    append("</table>")
+private fun headingFontSizeMultiplier(level: Int): Float = when (level) {
+    1 -> 1.40f
+    2 -> 1.30f
+    3 -> 1.20f
+    4 -> 1.15f
+    5 -> 1.10f
+    6 -> 1.05f
+    else -> 1.0f
 }
-
-private fun MessageSegment.Table.toPlainText(): String = buildString {
-    append(headers.joinToString(" | "))
-    append('\n')
-    for (row in rows) {
-        append(row.joinToString(" | "))
-        append('\n')
-    }
-}
-
-private fun escapeHtml(text: String): String = text
-    .replace("&", "&amp;")
-    .replace("<", "&lt;")
-    .replace(">", "&gt;")
-    .replace("\"", "&quot;")
