@@ -147,6 +147,27 @@ class ActiveThreadImpl(
                             if (messages.isNotEmpty()) {
                                 hasLoadedMessages = true
                                 _messages.value = messages
+                                // Feed the event-id → thread-root-id index so
+                                // push can resolve m.replace events targeting
+                                // any message in this thread without an SDK
+                                // round-trip. Skipped when messages is empty
+                                // (avoids a no-op write and initial-load races).
+                                try {
+                                    val mappings = HashMap<String, String>(messages.size)
+                                    for (m in messages) {
+                                        if (m.id.isNotBlank() && !m.id.startsWith("echo_")) {
+                                            mappings[m.id] = threadRootId
+                                        }
+                                    }
+                                    if (mappings.isNotEmpty()) {
+                                        settingsRepository.saveEventThreadRoots(
+                                            room.id(),
+                                            mappings,
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "diffStream[$threadRootId]: index write failed", e)
+                                }
                             } else if (hasLoadedMessages) {
                                 // Previously loaded messages but now empty (e.g. all events were
                                 // removed). Safe to emit the empty list.

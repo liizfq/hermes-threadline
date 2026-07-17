@@ -588,7 +588,23 @@ class RoomSessionListStore internal constructor(
         // empty, or after refresh completes with no items). Publish it so the
         // UI never shows stale sessions from the previous room.
         settingsRepository.saveSessionCache(instance.roomId, toPublish)
+        // Feed the event-id → thread-root-id index: every session contributes
+        // both its root event id and its latest reply event id. This is the
+        // ground-truth source for resolving m.replace pushes without an SDK
+        // round-trip.
+        saveEventThreadRootsFromSessions(instance.roomId, toPublish)
         _sessions.value = toPublish
+    }
+
+    private fun saveEventThreadRootsFromSessions(roomId: String, sessions: List<Session>) {
+        val mappings = HashMap<String, String>()
+        for (session in sessions) {
+            mappings[session.id] = session.id
+            session.latestEventId?.let { mappings[it] = session.id }
+        }
+        if (mappings.isNotEmpty()) {
+            settingsRepository.saveEventThreadRoots(roomId, mappings)
+        }
     }
 
     private suspend fun buildDiscovery(instance: ActiveInstance) {

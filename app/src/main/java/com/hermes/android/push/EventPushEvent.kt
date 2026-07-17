@@ -17,7 +17,17 @@ data class EventPushEvent(
     val sender: String? = null,
     val body: String? = null,
     val msgType: String? = null,
-    val threadRootId: String? = null
+    val threadRootId: String? = null,
+    /**
+     * For `m.replace` events: the event id of the message being edited, as
+     * parsed from `content.m.relates_to.event_id`. Used by the push worker to
+     * look up the parent thread root via the local event→thread-root index,
+     * avoiding an unreliable SDK round-trip on edit notifications.
+     *
+     * Null for plain messages and for m.thread replies (those already carry
+     * [threadRootId]).
+     */
+    val replaceTargetId: String? = null,
 ) {
     /** Stable dedup key — the tuple that uniquely identifies a Matrix event. */
     val dedupKey: String get() = "$roomId:$eventId"
@@ -30,6 +40,7 @@ data class EventPushEvent(
         body?.let { put(KEY_BODY, it) }
         msgType?.let { put(KEY_MSG_TYPE, it) }
         threadRootId?.let { put(KEY_THREAD_ROOT_ID, it) }
+        replaceTargetId?.let { put(KEY_REPLACE_TARGET_ID, it) }
     }.toString()
 
     companion object {
@@ -40,6 +51,7 @@ data class EventPushEvent(
         private const val KEY_BODY = "body"
         private const val KEY_MSG_TYPE = "msgType"
         private const val KEY_THREAD_ROOT_ID = "threadRootId"
+        private const val KEY_REPLACE_TARGET_ID = "replaceTargetId"
 
         fun fromJson(raw: String): EventPushEvent? = try {
             val obj = JSONObject(raw)
@@ -52,7 +64,8 @@ data class EventPushEvent(
                 sender = optStringSafe(obj, KEY_SENDER),
                 body = optStringSafe(obj, KEY_BODY),
                 msgType = optStringSafe(obj, KEY_MSG_TYPE),
-                threadRootId = optStringSafe(obj, KEY_THREAD_ROOT_ID)
+                threadRootId = optStringSafe(obj, KEY_THREAD_ROOT_ID),
+                replaceTargetId = optStringSafe(obj, KEY_REPLACE_TARGET_ID),
             )
         } catch (_: Exception) {
             null

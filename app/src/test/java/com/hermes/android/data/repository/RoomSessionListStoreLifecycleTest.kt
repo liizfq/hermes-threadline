@@ -144,6 +144,7 @@ class RoomSessionListStoreLifecycleTest {
  */
 internal class FakeSettingsRepository : SettingsRepository {
     val caches: MutableMap<String, List<Session>> = mutableMapOf()
+    val indexes: MutableMap<String, MutableMap<String, String>> = mutableMapOf()
     var saveCount: Int = 0
         private set
 
@@ -172,6 +173,16 @@ internal class FakeSettingsRepository : SettingsRepository {
     override fun getAllSessionTitles(): Map<String, String> = emptyMap()
     override fun deleteSessionTitle(threadRootId: String) {}
     override fun saveProvisionalSessionTitle(roomId: String, threadRootId: String, rootBody: String) {}
+    override fun saveEventThreadRoot(roomId: String, eventId: String, threadRootId: String) {
+        saveEventThreadRoots(roomId, mapOf(eventId to threadRootId))
+    }
+    override fun saveEventThreadRoots(roomId: String, mappings: Map<String, String>) {
+        if (mappings.isEmpty()) return
+        val existing = indexes.getOrPut(roomId) { LinkedHashMap() }
+        for ((k, v) in mappings) existing[k] = v
+    }
+    override fun getEventThreadRoot(roomId: String, eventId: String): String? =
+        indexes[roomId]?.get(eventId)
     override fun getDraft(threadRootId: String): String = ""
     override fun saveDraft(threadRootId: String, text: String) {}
     override fun clearDraft(threadRootId: String) {}

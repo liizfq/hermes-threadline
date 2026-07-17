@@ -110,7 +110,13 @@ class EventPushWorker @AssistedInject constructor(
         if (events.isEmpty()) return Result.success()
 
         // Resolve before grouping because event_id-only payloads may omit the thread root.
-        val resolvedEvents = events.map { event -> resolveEvent(event) ?: event }
+        // resolveReplaceTargetViaIndex runs BEFORE SDK resolution: the local index is
+        // cheap and authoritative for events we've already observed via timeline diffs.
+        val resolvedEvents = events.map { event ->
+            val indexed = resolveReplaceTargetViaIndex(event)
+            val sdkResolved = resolveEvent(indexed)
+            sdkResolved ?: indexed
+        }
         // Keep one notification per room + thread root. Different threads must not overwrite.
         val byThread = resolvedEvents.groupBy { event ->
             event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
@@ -249,6 +255,35 @@ class EventPushWorker @AssistedInject constructor(
     }
 
     /**
+     * Resolve an m.replace event's thread root via the local event-id →
+     * thread-root index.
+     *
+     * Matrix edits (`m.replace`) carry a `m.relates_to.event_id` pointing to
+     * the message being edited, but not a `m.thread` relation to the thread
+     * root. SDK lookups on the edit event id return null threadRootEventId()
+     * for the same reason, so SDK-based resolution is unreliable for edits.
+     *
+     * This method uses the index populated by RoomSessionListStore (root +
+     * latest reply per session) and ActiveThreadImpl (every message in the
+     * focused thread) to look up the thread root of the edited message. The
+     * index is cold-started from live timeline observation; if the event
+     * wasn't observed (e.g. very old message edited before the app saw it),
+     * lookup returns null and the caller falls back to the existing
+     * payload-derived threadRootId (or the event's own id).
+     *
+     * Returns:
+     *  - The original [event] unchanged when no replace target is present.
+     *  - The original [event] unchanged when the index lookup misses.
+     *  - A copy of [event] with [EventPushEvent.threadRootId] set to the
+     *    indexed thread root (overriding any payload-derived fallback).
+     */
+    private fun resolveReplaceTargetViaIndex(event: EventPushEvent): EventPushEvent {
+        val target = event.replaceTargetId?.takeIf { it.isNotBlank() } ?: return event
+        val indexed = settingsRepository.getEventThreadRoot(event.roomId, target)
+        return applyIndexedThreadRoot(event, indexed, target, "EventPushWorker")
+    }
+
+    /**
      * Resolve a queued event via the SDK `NotificationClient`.
      *
      * Returns null on any failure (no authenticated client, network error,
@@ -265,11 +300,24 @@ class EventPushWorker @AssistedInject constructor(
             val nc = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
             try {
                 when (val status = nc.getNotification(event.roomId, event.eventId)) {
-                    is NotificationStatus.Event -> notificationItemToEventPushEvent(
-                        roomId = event.roomId,
-                        eventId = event.eventId,
-                        item = status.item,
-                    )
+                    is NotificationStatus.Event -> {
+                        val resolved = notificationItemToEventPushEvent(
+                            roomId = event.roomId,
+                            eventId = event.eventId,
+                            item = status.item,
+                        )
+                        // Preserve the index-resolved thread root and replace
+                        // target id: SDK threadRootEventId() is null for
+                        // m.replace edits (no m.thread relation on the edit),
+                        // which would otherwise discard the value we just
+                        // recovered via the local index.
+                        val mergedThreadRoot = resolved.threadRootId
+                            ?: event.threadRootId
+                        resolved.copy(
+                            threadRootId = mergedThreadRoot,
+                            replaceTargetId = event.replaceTargetId ?: resolved.replaceTargetId,
+                        )
+                    }
                     is NotificationStatus.EventFilteredOut,
                     is NotificationStatus.EventNotFound,
                     is NotificationStatus.EventRedacted -> null  // fall back to payload
@@ -369,6 +417,47 @@ private fun extractBody(item: org.matrix.rustcomponents.sdk.NotificationItem): S
 private fun threadRootOf(event: NotificationEvent): String? = when (event) {
     is NotificationEvent.Timeline -> event.event.threadRootEventId()
     is NotificationEvent.Invite -> null
+}
+
+/**
+ * Pure decision for applying an index-resolved thread root to a push event.
+ *
+ * Used by [EventPushWorker.resolveReplaceTargetViaIndex] (and covered by
+ * [ApplyIndexedThreadRootTest]) so the override-vs-preserve logic is unit-
+ * testable without the worker's Android/SDK dependencies.
+ *
+ * Returns:
+ *  - [event] unchanged when [indexedRoot] is null/blank (cache miss).
+ *  - [event] unchanged when [indexedRoot] equals the event's own id (would
+ *    be a no-op and signals a self-referential entry).
+ *  - [event] unchanged when the payload already carried a real m.thread
+ *    root (threadRootId != null AND != event.eventId) — trust the explicit
+ *    thread relation over the index in the exotic m.replace + m.thread case.
+ *  - Otherwise a copy with [EventPushEvent.threadRootId] = [indexedRoot].
+ *
+ * [logTag] is used only for the debug log line; passing it keeps the helper
+ * pure (no Android Log import needed for tests).
+ */
+internal fun applyIndexedThreadRoot(
+    event: EventPushEvent,
+    indexedRoot: String?,
+    target: String,
+    logTag: String,
+): EventPushEvent {
+    if (indexedRoot.isNullOrBlank() || indexedRoot == event.eventId) {
+        Log.d(logTag, "resolveReplaceTargetViaIndex: miss eventId=${event.eventId} target=$target")
+        return event
+    }
+    if (event.threadRootId != null && event.threadRootId != event.eventId) {
+        // Payload already carried an m.thread root; preserve it.
+        return event
+    }
+    Log.d(
+        logTag,
+        "resolveReplaceTargetViaIndex: hit eventId=${event.eventId} " +
+            "target=$target root=$indexedRoot source=index"
+    )
+    return event.copy(threadRootId = indexedRoot)
 }
 
 /** Pure body extraction from a timeline event; supports message types. */

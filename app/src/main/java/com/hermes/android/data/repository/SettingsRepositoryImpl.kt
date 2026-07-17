@@ -30,6 +30,14 @@ internal const val SESSION_CACHE_KEY_PREFIX = "session_cache_json::"
 
 internal fun sessionCacheKey(roomId: String): String = SESSION_CACHE_KEY_PREFIX + roomId
 
+/** Prefix for room-scoped event-id → thread-root-id index keys. */
+internal const val EVENT_THREAD_ROOT_KEY_PREFIX = "event_thread_root_index::"
+
+/** Max entries kept per room; LRU eviction when this threshold is exceeded. */
+internal const val EVENT_THREAD_ROOT_MAX_PER_ROOM = 1000
+
+internal fun eventThreadRootKey(roomId: String): String = EVENT_THREAD_ROOT_KEY_PREFIX + roomId
+
 /**
  * Read the room-scoped cache JSON for [roomId], migrating the legacy
  * single-room blob exactly once when [roomId] equals [boundRoomId].
@@ -92,6 +100,39 @@ internal fun upsertProvisionalSession(
 ): List<Session> {
     val without = existing?.filter { it.id != provisional.id } ?: emptyList()
     return listOf(provisional) + without
+}
+
+/**
+ * Pure LRU update for the event-id → thread-root-id index. Returns a new
+ * [LinkedHashMap] with:
+ *  - each entry from [updates] inserted/refreshed at the end (most-recent),
+ *  - existing entries for the same eventId moved to end with updated value,
+ *  - entries beyond [maxEntries] evicted from the head (least-recent).
+ *
+ * Insertion order is preserved so JSON serialization round-trips to the same
+ * LRU semantics. Pure over [existing] — extracted so the LRU logic is unit-
+ * testable without Android [Context].
+ */
+internal fun applyEventThreadRootUpdates(
+    existing: Map<String, String>,
+    updates: Map<String, String>,
+    maxEntries: Int,
+): LinkedHashMap<String, String> {
+    // Start from existing order, dropping any key that will be refreshed so
+    // the refresh lands at the tail (most-recent).
+    val result = linkedMapOf<String, String>()
+    for ((k, v) in existing) {
+        if (k in updates) continue
+        result[k] = v
+    }
+    for ((k, v) in updates) {
+        result[k] = v
+    }
+    while (result.size > maxEntries) {
+        val firstKey = result.keys.iterator().next()
+        result.remove(firstKey)
+    }
+    return result
 }
 
 @Singleton
@@ -247,6 +288,43 @@ class SettingsRepositoryImpl @Inject constructor(
             ?: return
         val updated = upsertProvisionalSession(getSessionCache(roomId), provisional)
         saveSessionCache(roomId, updated)
+    }
+
+    override fun saveEventThreadRoot(roomId: String, eventId: String, threadRootId: String) {
+        saveEventThreadRoots(roomId, mapOf(eventId to threadRootId))
+    }
+
+    override fun saveEventThreadRoots(roomId: String, mappings: Map<String, String>) {
+        if (mappings.isEmpty()) return
+        val existing = readEventThreadRootIndex(roomId)
+        val updated = applyEventThreadRootUpdates(
+            existing = existing,
+            updates = mappings,
+            maxEntries = EVENT_THREAD_ROOT_MAX_PER_ROOM,
+        )
+        val json = JSONObject()
+        for ((k, v) in updated) {
+            json.put(k, v)
+        }
+        prefs.edit().putString(eventThreadRootKey(roomId), json.toString()).apply()
+    }
+
+    override fun getEventThreadRoot(roomId: String, eventId: String): String? =
+        readEventThreadRootIndex(roomId)[eventId]
+
+    private fun readEventThreadRootIndex(roomId: String): Map<String, String> = try {
+        val json = prefs.getString(eventThreadRootKey(roomId), null) ?: return emptyMap()
+        val obj = JSONObject(json)
+        // Build a LinkedHashMap so iteration order reflects file order (which
+        // is the LRU order we serialized); required for correct eviction on
+        // subsequent updates.
+        val ordered = linkedMapOf<String, String>()
+        for (key in obj.keys()) {
+            ordered[key] = obj.getString(key)
+        }
+        ordered
+    } catch (_: Exception) {
+        emptyMap()
     }
 
     private val draftCache = java.util.concurrent.ConcurrentHashMap<String, String>()

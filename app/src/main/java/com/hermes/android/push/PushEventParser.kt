@@ -68,6 +68,16 @@ class PushEventParser {
             val newContent = content?.optJSONObject("m.new_content")
             val rawBody = newContent?.optString("body", "") ?: content?.optString("body", "") ?: ""
 
+            // For m.replace, capture the target event id (the message being
+            // edited) so the worker can look up the parent thread root via
+            // the local event→thread-root index. Only set when the relation
+            // is m.replace; m.thread already populates threadRootId.
+            val replaceTargetId = content
+                ?.optJSONObject("m.relates_to")
+                ?.takeIf { it.optString("rel_type", "") == "m.replace" }
+                ?.optString("event_id", "")
+                ?.ifBlank { null }
+
             // Tool/status filtering by first line only applies when body is
             // available. event_id_only payloads carry no body; the worker
             // defers filtering until the SDK has resolved the content.
@@ -87,7 +97,8 @@ class PushEventParser {
                 sender = sender.ifBlank { null },
                 body = rawBody.ifBlank { null },
                 msgType = content?.optString("msgtype", "")?.ifBlank { null },
-                threadRootId = threadRootId
+                threadRootId = threadRootId,
+                replaceTargetId = replaceTargetId,
             )
         } catch (e: Exception) {
             Log.e(TAG, "parseAndFilter failed", e)

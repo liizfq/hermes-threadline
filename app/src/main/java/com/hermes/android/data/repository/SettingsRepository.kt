@@ -48,6 +48,31 @@ interface SettingsRepository {
      */
     fun saveProvisionalSessionTitle(roomId: String, threadRootId: String, rootBody: String)
 
+    /**
+     * Persist an `eventId -> threadRootId` mapping for [roomId]. Populated
+     * from live timeline observation (RoomSessionListStore.publishIfActive and
+     * ActiveThreadImpl diffs). Used by the push worker to resolve m.replace
+     * events to their parent thread root without an SDK round-trip.
+     *
+     * The index is room-scoped and capped (LRU per room); inserting a new
+     * mapping for an existing eventId updates its threadRootId and moves it
+     * to most-recent.
+     */
+    fun saveEventThreadRoot(roomId: String, eventId: String, threadRootId: String)
+
+    /**
+     * Batch variant: persists multiple mappings for [roomId] in one write.
+     * Used by RoomSessionListStore.publishIfActive which already has the full
+     * session list. Each entry updates LRU recency.
+     */
+    fun saveEventThreadRoots(roomId: String, mappings: Map<String, String>)
+
+    /**
+     * Look up the thread root id for [eventId] under [roomId]'s index. Returns
+     * null when the mapping is absent (cold cache, eviction, or foreign event).
+     */
+    fun getEventThreadRoot(roomId: String, eventId: String): String?
+
     fun getDraft(threadRootId: String): String
     fun saveDraft(threadRootId: String, text: String)
     fun clearDraft(threadRootId: String)
