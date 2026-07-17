@@ -10,34 +10,47 @@ class PushPayloadParserTest {
     inner class ThreadRelationExtraction {
         @Test
         fun `thread relation uses root event id`() {
-            assertEquals(
-                "\$rootId456",
-                resolveThreadRoot("\$child123", "m.thread", "\$rootId456")
-            )
+            val r = resolveThreadRoot("\$child123", "m.thread", "\$rootId456")
+            assertEquals("\$rootId456", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
 
         @Test
         fun `empty thread event id falls back to notification event_id`() {
-            assertEquals(
-                "\$fallbackEvent",
-                resolveThreadRoot("\$fallbackEvent", "m.thread", "")
-            )
+            val r = resolveThreadRoot("\$fallbackEvent", "m.thread", "")
+            assertEquals("\$fallbackEvent", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
 
         @Test
         fun `non-thread relation uses event_id`() {
-            assertEquals(
-                "\$regularEvent",
-                resolveThreadRoot("\$regularEvent", "m.reference", "\$someOther")
-            )
+            val r = resolveThreadRoot("\$regularEvent", "m.reference", "\$someOther")
+            assertEquals("\$regularEvent", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
 
         @Test
         fun `no thread relation uses event_id`() {
-            assertEquals(
-                "\$plain",
-                resolveThreadRoot("\$plain", "", "")
-            )
+            val r = resolveThreadRoot("\$plain", "", "")
+            assertEquals("\$plain", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
+        }
+    }
+
+    @Nested
+    inner class ReplaceRelationExtraction {
+        @Test
+        fun `replace relation returns replaced event id as provisional thread root`() {
+            val r = resolveThreadRoot("\$editEvt", "m.replace", "\$origEvt")
+            assertEquals("\$origEvt", r.threadRootId)
+            assertTrue(r.isReplaceTarget, "m.replace must mark threadRootId as provisional")
+        }
+
+        @Test
+        fun `replace relation with blank target falls back to notification event id`() {
+            val r = resolveThreadRoot("\$editEvt", "m.replace", "")
+            assertEquals("\$editEvt", r.threadRootId)
+            assertFalse(r.isReplaceTarget, "no target → no provisional lookup needed")
         }
     }
 
@@ -45,14 +58,13 @@ class PushPayloadParserTest {
     inner class SpecialCharacters {
         @Test
         fun `matrix event id with special chars routes unchanged`() {
-            assertEquals(
-                "\$root/abc:def.matrix.org",
-                resolveThreadRoot(
-                    "\$e3Flx+G8/abc:matrix.org",
-                    "m.thread",
-                    "\$root/abc:def.matrix.org"
-                )
+            val r = resolveThreadRoot(
+                "\$e3Flx+G8/abc:matrix.org",
+                "m.thread",
+                "\$root/abc:def.matrix.org"
             )
+            assertEquals("\$root/abc:def.matrix.org", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
     }
 
@@ -60,26 +72,23 @@ class PushPayloadParserTest {
     inner class EdgeCases {
         @Test
         fun `blank relType returns notification event id`() {
-            assertEquals(
-                "\$onlyEvent",
-                resolveThreadRoot("\$onlyEvent", "", "\$root")
-            )
+            val r = resolveThreadRoot("\$onlyEvent", "", "\$root")
+            assertEquals("\$onlyEvent", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
 
         @Test
         fun `thread relation takes root even if notification event is blank`() {
-            assertEquals(
-                "\$onlyRoot",
-                resolveThreadRoot("", "m.thread", "\$onlyRoot")
-            )
+            val r = resolveThreadRoot("", "m.thread", "\$onlyRoot")
+            assertEquals("\$onlyRoot", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
 
         @Test
         fun `blank root falls back to notification event`() {
-            assertEquals(
-                "\$notificationEvt",
-                resolveThreadRoot("\$notificationEvt", "m.thread", "")
-            )
+            val r = resolveThreadRoot("\$notificationEvt", "m.thread", "")
+            assertEquals("\$notificationEvt", r.threadRootId)
+            assertFalse(r.isReplaceTarget)
         }
     }
 }

@@ -17,7 +17,13 @@ data class EventPushEvent(
     val sender: String? = null,
     val body: String? = null,
     val msgType: String? = null,
-    val threadRootId: String? = null
+    val threadRootId: String? = null,
+    /**
+     * True when [threadRootId] is actually the target event id of an
+     * `m.replace` (edit) relation, not a verified thread root. The worker
+     * should re-resolve it via the SDK to find the real thread root.
+     */
+    val threadRootIsReplaceTarget: Boolean = false,
 ) {
     /** Stable dedup key — the tuple that uniquely identifies a Matrix event. */
     val dedupKey: String get() = "$roomId:$eventId"
@@ -30,6 +36,7 @@ data class EventPushEvent(
         body?.let { put(KEY_BODY, it) }
         msgType?.let { put(KEY_MSG_TYPE, it) }
         threadRootId?.let { put(KEY_THREAD_ROOT_ID, it) }
+        if (threadRootIsReplaceTarget) put(KEY_THREAD_ROOT_IS_REPLACE_TARGET, true)
     }.toString()
 
     companion object {
@@ -40,6 +47,7 @@ data class EventPushEvent(
         private const val KEY_BODY = "body"
         private const val KEY_MSG_TYPE = "msgType"
         private const val KEY_THREAD_ROOT_ID = "threadRootId"
+        private const val KEY_THREAD_ROOT_IS_REPLACE_TARGET = "threadRootIsReplaceTarget"
 
         fun fromJson(raw: String): EventPushEvent? = try {
             val obj = JSONObject(raw)
@@ -52,7 +60,8 @@ data class EventPushEvent(
                 sender = optStringSafe(obj, KEY_SENDER),
                 body = optStringSafe(obj, KEY_BODY),
                 msgType = optStringSafe(obj, KEY_MSG_TYPE),
-                threadRootId = optStringSafe(obj, KEY_THREAD_ROOT_ID)
+                threadRootId = optStringSafe(obj, KEY_THREAD_ROOT_ID),
+                threadRootIsReplaceTarget = obj.optBoolean(KEY_THREAD_ROOT_IS_REPLACE_TARGET, false),
             )
         } catch (_: Exception) {
             null

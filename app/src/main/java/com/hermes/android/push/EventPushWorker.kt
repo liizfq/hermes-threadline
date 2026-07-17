@@ -110,7 +110,16 @@ class EventPushWorker @AssistedInject constructor(
         if (events.isEmpty()) return Result.success()
 
         // Resolve before grouping because event_id-only payloads may omit the thread root.
-        val resolvedEvents = events.map { event -> resolveEvent(event) ?: event }
+        val resolvedEvents = events.map { event ->
+            var resolved = resolveEvent(event) ?: event
+            // m.replace events carry the replaced event id as threadRootId,
+            // not the real thread root. Re-resolve via the SDK to find the
+            // replaced event's actual thread membership.
+            if (resolved.threadRootIsReplaceTarget) {
+                resolved = resolveReplaceTargetThreadRoot(resolved) ?: resolved
+            }
+            resolved
+        }
         // Keep one notification per room + thread root. Different threads must not overwrite.
         val byThread = resolvedEvents.groupBy { event ->
             event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
@@ -249,6 +258,55 @@ class EventPushWorker @AssistedInject constructor(
     }
 
     /**
+     * Resolve the real thread root for an `m.replace` event.
+     *
+     * When [event.threadRootId] is actually the replaced event id (marked by
+     * [EventPushEvent.threadRootIsReplaceTarget]), we look up the replaced
+     * event via the SDK `NotificationClient` and read its
+     * `threadRootEventId()`. If the replaced event has a thread root, that's
+     * our answer; otherwise the replaced event is itself a top-level message
+     * and is its own thread root.
+     *
+     * Returns null on any failure so the caller keeps the original
+     * provisional values (still better than using the edit's own event_id).
+     */
+    private suspend fun resolveReplaceTargetThreadRoot(event: EventPushEvent): EventPushEvent? {
+        val replacedEventId = event.threadRootId?.takeIf { it.isNotBlank() } ?: return null
+
+        return try {
+            val client = matrixRepository.getClient()
+                ?: matrixRepository.restoreSession()?.getOrNull()
+                ?: return null
+
+            val nc = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
+            try {
+                val realRoot = when (val status = nc.getNotification(event.roomId, replacedEventId)) {
+                    is NotificationStatus.Event -> status.item.event.let { ev ->
+                        when (ev) {
+                            is NotificationEvent.Timeline -> ev.event.threadRootEventId()
+                            is NotificationEvent.Invite -> null
+                        }
+                    }
+                    is NotificationStatus.EventFilteredOut,
+                    is NotificationStatus.EventNotFound,
+                    is NotificationStatus.EventRedacted -> null
+                }
+                if (realRoot != null && realRoot.isNotBlank()) {
+                    event.copy(threadRootId = realRoot, threadRootIsReplaceTarget = false)
+                } else {
+                    // Replaced event has no thread root → it IS the thread root.
+                    event.copy(threadRootId = replacedEventId, threadRootIsReplaceTarget = false)
+                }
+            } finally {
+                nc.close()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "resolveReplaceTargetThreadRoot: failed for ${event.roomId}:$replacedEventId", e)
+            null
+        }
+    }
+
+    /**
      * Resolve a queued event via the SDK `NotificationClient`.
      *
      * Returns null on any failure (no authenticated client, network error,
@@ -357,6 +415,8 @@ private fun notificationItemToEventPushEvent(
     body = extractBody(item),
     msgType = extractMsgType(item),
     threadRootId = threadRootOf(item.event),
+    // SDK-resolved: thread root is definitive, never a replace target.
+    threadRootIsReplaceTarget = false,
 )
 
 /** Extract a display body from the SDK notification item. */

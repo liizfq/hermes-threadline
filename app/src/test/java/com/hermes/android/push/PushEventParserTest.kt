@@ -22,6 +22,7 @@ class PushEventParserTest {
         msgType: String? = "m.text",
         roomName: String = "Room A",
         threadRootId: String? = null,
+        replaceTargetId: String? = null,
         unread: Int = 1
     ): ByteArray {
         val content = if (msgType != null || threadRootId != null || body.isNotEmpty()) {
@@ -34,6 +35,19 @@ class PushEventParserTest {
                     put("event_id", threadRootId)
                 }
                 c.put("m.relates_to", rel)
+            }
+            if (replaceTargetId != null) {
+                val rel = org.json.JSONObject().apply {
+                    put("rel_type", "m.replace")
+                    put("event_id", replaceTargetId)
+                }
+                c.put("m.relates_to", rel)
+                // Edits carry the new body under m.new_content.
+                val newContent = org.json.JSONObject().apply {
+                    c.put("m.new_content", this)
+                    put("body", body)
+                    put("msgtype", msgType ?: "m.text")
+                }
             }
             c.toString()
         } else {
@@ -75,6 +89,35 @@ class PushEventParserTest {
             val event = parser.parseAndFilter(bytes, boundRoomId = null, isForeground = false, timeoutMinutes = 5)
             assertNotNull(event)
             assertEquals("\$root:matrix.org", event!!.threadRootId)
+            assertFalse(event.threadRootIsReplaceTarget, "m.thread must not be flagged as replace target")
+        }
+
+        @Test
+        fun `m replace sets thread root to replaced event id and flags provisional`() {
+            val bytes = payload(
+                eventId = "\$edit:matrix.org",
+                replaceTargetId = "\$orig:matrix.org",
+                body = "edited body",
+            )
+            val event = parser.parseAndFilter(bytes, boundRoomId = null, isForeground = false, timeoutMinutes = 5)
+            assertNotNull(event)
+            assertEquals("\$orig:matrix.org", event!!.threadRootId,
+                "m.replace must set threadRootId to the replaced event id, not the edit's own id")
+            assertTrue(event.threadRootIsReplaceTarget,
+                "m.replace must mark threadRootId as provisional for SDK re-resolution")
+        }
+
+        @Test
+        fun `m replace uses new_content body when present`() {
+            val bytes = payload(
+                eventId = "\$edit:matrix.org",
+                replaceTargetId = "\$orig:matrix.org",
+                body = "new body from m_new_content",
+            )
+            val event = parser.parseAndFilter(bytes, boundRoomId = null, isForeground = false, timeoutMinutes = 5)
+            assertNotNull(event)
+            // PushEventParser prefers m.new_content.body over the outer body.
+            assertEquals("new body from m_new_content", event!!.body)
         }
     }
 
