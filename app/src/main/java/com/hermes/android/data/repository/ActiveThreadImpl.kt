@@ -433,49 +433,10 @@ class ActiveThreadImpl(
         key: String
     ): Result<Unit> {
         return try {
-            // Extract the target event ID; local echoes cannot be reacted to.
-            val eventId = when (eventOrTransactionId) {
-                is EventOrTransactionId.EventId -> eventOrTransactionId.eventId
-                else -> {
-                    withContext(Dispatchers.IO) {
-                        timeline.toggleReaction(eventOrTransactionId, key)
-                    }
-                    return Result.success(Unit)
-                }
+            withContext(Dispatchers.IO) {
+                timeline.toggleReaction(eventOrTransactionId, key)
             }
-
-            // Check local reaction state to decide add vs remove.
-            val alreadyReacted = mutex.withLock {
-                items
-                    .mapNotNull { extractMessageFromItem(it) }
-                    .find { it.id == eventId }
-                    ?.reactions
-                    ?.any { it.key == key && it.isOwn }
-                    ?: false
-            }
-
-            if (alreadyReacted) {
-                withContext(Dispatchers.IO) {
-                    timeline.toggleReaction(eventOrTransactionId, key)
-                }
-                Log.d(TAG, "toggleReaction: removed reaction $key from $eventId")
-            } else {
-                val reactionJson = buildString {
-                    append("{\"m.relates_to\":{")
-                    append("\"rel_type\":\"m.annotation\",")
-                    append("\"event_id\":\"")
-                    append(eventId.replace("\"", "\\\""))
-                    append("\",\"key\":\"")
-                    append(key.replace("\"", "\\\""))
-                    append("\"},\"m.thread\":{\"event_id\":\"")
-                    append(threadRootId.replace("\"", "\\\""))
-                    append("\"}}")
-                }
-                withContext(Dispatchers.IO) {
-                    room.sendRaw("m.reaction", reactionJson)
-                }
-                Log.d(TAG, "toggleReaction: added reaction $key on $eventId in thread $threadRootId")
-            }
+            Log.d(TAG, "toggleReaction: toggled reaction $key for $eventOrTransactionId")
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "toggleReaction failed", e)
