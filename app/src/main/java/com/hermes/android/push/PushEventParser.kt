@@ -62,9 +62,7 @@ class PushEventParser {
             }
 
             val content = notification.optJSONObject("content")
-            val resolved = extractThreadRootId(notification)
-            val threadRootId = resolved.threadRootId.takeIf { it.isNotBlank() }
-            val threadRootIsReplaceTarget = resolved.isReplaceTarget && threadRootId != null
+            val threadRootId = extractThreadRootId(notification)
 
             // Handle m.replace (edits) — prefer new_content body.
             val newContent = content?.optJSONObject("m.new_content")
@@ -89,8 +87,7 @@ class PushEventParser {
                 sender = sender.ifBlank { null },
                 body = rawBody.ifBlank { null },
                 msgType = content?.optString("msgtype", "")?.ifBlank { null },
-                threadRootId = threadRootId,
-                threadRootIsReplaceTarget = threadRootIsReplaceTarget,
+                threadRootId = threadRootId
             )
         } catch (e: Exception) {
             Log.e(TAG, "parseAndFilter failed", e)
