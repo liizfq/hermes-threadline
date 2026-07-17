@@ -1,7 +1,6 @@
 package com.hermes.android.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,7 +19,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.selection.SelectionContainer
 import com.hermes.android.ui.theme.AgentColors
 
 @Composable
@@ -50,18 +48,9 @@ fun TableBlock(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            // Block parent's combinedClickable (long-press → copy all) by
-            // intercepting click without doing anything. SelectionContainer
-            // handles long-press for text selection internally.
-            .combinedClickable(
-                enabled = true,
-                onClick = { /* swallow */ },
-                onLongClick = { /* swallow — prevent bubble long-press copy */ },
-            )
             .horizontalScroll(scrollState)
     ) {
-        SelectionContainer {
-            Column(
+        Column(
             modifier = Modifier
                 .width(tableWidth)
                 .drawBehind {
@@ -119,7 +108,6 @@ fun TableBlock(
                     }
                 }
             }
-        }
         }
     }
 }
