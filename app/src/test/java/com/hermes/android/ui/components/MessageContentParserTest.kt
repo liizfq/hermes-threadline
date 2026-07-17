@@ -502,4 +502,45 @@ class MessageContentParserTest {
         val text = segments[0] as MessageSegment.Text
         assertEquals("beforevisibleafter", text.plainText)
     }
+
+    // ── markdown table inside HTML (formattedBody set) ───────────────────
+
+    @Test
+    fun `markdown table inside p is extracted even when formattedBody is set`() {
+        // Hermes Agent always sends formatted_body. GFM tables survive as raw
+        // pipe text inside <p> separated by <br>. Parser must still recognise
+        // them and emit a Table segment.
+        val html = "<p>| Name | Age |<br>|---|---|<br>| Alice | 30 |<br>| Bob | 25 |</p>"
+
+        val segments = parser.parse(body = html, formattedBody = html)
+
+        assertEquals(1, segments.size, "expected one Table segment; got: $segments")
+        val table = segments[0] as MessageSegment.Table
+        assertEquals(listOf("Name", "Age"), table.headers)
+        assertEquals(2, table.rows.size)
+        assertEquals(listOf("Alice", "30"), table.rows[0])
+        assertEquals(listOf("Bob", "25"), table.rows[1])
+    }
+
+    @Test
+    fun `markdown table inside p with leading prose splits into Text then Table`() {
+        val html = "<p>Here is a table:<br>| A | B |<br>|---|---|<br>| 1 | 2 |</p>"
+
+        val segments = parser.parse(body = html, formattedBody = html)
+
+        assertEquals(2, segments.size, "got: $segments")
+        assertTrue(segments[0] is MessageSegment.Text, "first segment should be prose Text")
+        assertTrue(segments[1] is MessageSegment.Table, "second segment should be Table")
+    }
+
+    @Test
+    fun `paragraph with pipes but not table shape stays Text`() {
+        // Single pipe in prose should not be misread as a table.
+        val html = "<p>a | b</p>"
+
+        val segments = parser.parse(body = html, formattedBody = html)
+
+        assertEquals(1, segments.size, "got: $segments")
+        assertTrue(segments[0] is MessageSegment.Text)
+    }
 }

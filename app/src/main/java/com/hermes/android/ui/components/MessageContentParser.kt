@@ -118,7 +118,16 @@ class MessageContentParser {
             "blockquote", "p" -> {
                 flushText(buffer, result)
                 val plain = el.text()
-                if (plain.isNotBlank()) {
+                if (plain.isBlank()) return
+                // Matrix senders usually wrap content in <p> and don't enable
+                // GFM table extension, so markdown tables survive as raw
+                // "| a | b |\n|---|---|\n| 1 | 2 |"-style text inside <p>.
+                // Try markdown-table extraction on the br-preserved text;
+                // if no table pattern is found, fall back to a Text segment.
+                val multiline = elementToMultilineText(el)
+                if (multiline.contains('|') && looksLikeMarkdownTable(multiline)) {
+                    result.addAll(parseMarkdownTables(multiline))
+                } else {
                     result.add(MessageSegment.Text(
                         html = el.outerHtml(),
                         plainText = plain,
@@ -228,6 +237,48 @@ class MessageContentParser {
             html = fragment,
             plainText = Jsoup.parse(fragment).text(),
         ))
+    }
+
+    /**
+     * Walks [el]'s children, converting `<br>` to `\n` and preserving the
+     * relative order of text nodes. Unlike [Element.text] (which collapses
+     * whitespace and joins with spaces), this keeps line breaks so markdown
+     * table rows stay on separate lines.
+     */
+    private fun elementToMultilineText(el: Element): String {
+        val sb = StringBuilder()
+        fun walk(node: Node) {
+            when (node) {
+                is TextNode -> sb.append(node.text())
+                is Element -> {
+                    if (node.tagName() == "br") {
+                        sb.append('\n')
+                    } else {
+                        node.childNodes().forEach(::walk)
+                    }
+                }
+                else -> Unit
+            }
+        }
+        walk(el)
+        return sb.toString()
+    }
+
+    /**
+     * Quick positive-check for a GFM-style table anywhere in [text]: finds
+     * the first line containing `|`, then verifies the line immediately
+     * after is a valid separator (`---`, `:--:`, …) with matching column
+     * count. Leading prose lines are allowed.
+     */
+    private fun looksLikeMarkdownTable(text: String): Boolean {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val headerIdx = lines.indexOfFirst { it.contains('|') }
+        if (headerIdx < 0 || headerIdx + 1 >= lines.size) return false
+        val headers = splitTableRow(lines[headerIdx])
+        if (headers.isEmpty() || headers.all { it.isBlank() }) return false
+        if (!isTableSeparator(lines[headerIdx + 1])) return false
+        val aligns = parseAlignments(lines[headerIdx + 1])
+        return aligns.size == headers.size
     }
 
     private fun parseHtmlTable(table: Element): MessageSegment.Table? {
