@@ -18,12 +18,12 @@ import com.hermes.android.ui.settings.strEnZh
 /**
  * Adaptive two-pane layout for landscape / large screens.
  *
- * Left pane (session list): proportional width clamped to 240–400dp.
+ * Left pane (session list): proportional width clamped to 280–480dp.
  * Right pane (chat): fills remaining space.
  *
- * - Phone landscape (~700dp+): left pane ≈ 240–280dp
- * - Small tablet (~1000dp): left pane ≈ 320dp
- * - Large tablet (~1280dp+): left pane ≈ 400dp
+ * - Phone landscape (~700dp+): left pane ≈ 280–320dp
+ * - Small tablet (~1000dp): left pane ≈ 380dp
+ * - Large tablet (~1280dp+): left pane ≈ 480dp
  *
  * @param listContent  the session list composable
  * @param chatContent  the chat area composable (null = no session selected)
@@ -34,12 +34,13 @@ fun TwoPaneLayout(
     chatContent: (@Composable () -> Unit)?
 ) {
     Row(modifier = Modifier.fillMaxSize()) {
-        // Left pane: 30% of screen width, clamped to [240, 400] dp
+        // Left pane: ~38% of screen width, clamped to [280, 480] dp
+        // (was 30% / 240–400 — session list felt too narrow in phone landscape)
         Surface(
             modifier = Modifier
                 .fillMaxHeight()
-                .weight(0.3f)
-                .widthIn(min = 240.dp, max = 400.dp),
+                .weight(0.38f)
+                .widthIn(min = 280.dp, max = 480.dp),
             tonalElevation = 2.dp,
             color = MaterialTheme.colorScheme.surface
         ) {
