@@ -68,21 +68,12 @@ class PushEventParser {
 
             // Handle m.replace (edits) — prefer new_content body.
             val newContent = content?.optJSONObject("m.new_content")
-            val isReplace = content?.optJSONObject("m.relates_to")
-                ?.optString("rel_type") == "m.replace"
             val rawBody = newContent?.optString("body", "") ?: content?.optString("body", "") ?: ""
 
             // Tool/status filtering by first line only applies when body is
             // available. event_id_only payloads carry no body; the worker
             // defers filtering until the SDK has resolved the content.
-            //
-            // m.replace (edits) bypass the first-line filter: the edited
-            // content may legitimately start with a tool/status emoji (e.g.
-            // "💻 terminal") while the *original* message was a normal reply
-            // the user already saw. Filtering here would drop the edit
-            // notification entirely, leaving the thread root stuck on a
-            // stale title.
-            if (rawBody.isNotBlank() && !isReplace) {
+            if (rawBody.isNotBlank()) {
                 val firstLine = rawBody.lineSequence().firstOrNull()?.trim() ?: ""
                 if (firstLine.isNotBlank() && shouldSkipByFirstLine(firstLine, timeoutMinutes)) {
                     return null
