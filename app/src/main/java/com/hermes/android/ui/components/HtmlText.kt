@@ -62,7 +62,6 @@ fun HtmlText(
     onLinkClick: ((String) -> Unit)? = null,
     fontSizeMultiplier: Float = 1f,
     forceBold: Boolean = false,
-    isListBlock: Boolean = false,
 ) {
     val (provider, style) = rememberHtmlConverterProvider()
 
@@ -78,15 +77,19 @@ fun HtmlText(
         }
     }
 
-    // For list blocks, trim only the leading/trailing newlines introduced by
-    // the converter's block-element handling. Additionally, compress the
-    // pure-`\n` gap between adjacent OrderedListSpan / UnorderedListSpan
-    // siblings (the converter emits `\n\n` between non-first `<li>`s) so
-    // list items render on consecutive lines instead of with blank gaps.
-    // `<br><br>` inside a paragraph run, nested-list spans, and non-list
+    // For messages containing lists, trim only the leading/trailing newlines
+    // introduced by the converter's block-element handling. Additionally,
+    // compress the pure-`\n` gap between adjacent OrderedListSpan /
+    // UnorderedListSpan siblings (the converter emits `\n\n` between non-first
+    // `<li>`s) so list items render on consecutive lines instead of with blank
+    // gaps. `<br><br>` inside a paragraph run, nested-list spans, and non-list
     // segments are all left untouched.
-    val text = remember(rawText, isListBlock) {
-        if (isListBlock) trimListSpacing(rawText) else rawText
+    val hasListBlock = remember(html) {
+        html?.contains("<ul", ignoreCase = true) == true ||
+            html?.contains("<ol", ignoreCase = true) == true
+    }
+    val text = remember(rawText, hasListBlock) {
+        if (hasListBlock) trimListSpacing(rawText) else rawText
     }
 
     AndroidView(

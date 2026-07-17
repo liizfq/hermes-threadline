@@ -674,18 +674,13 @@ private fun MessageBubble(
             ) {
                 when (val content = message.content) {
                     is MessageContent.Text -> {
-                        if (content.segments.isNotEmpty()) {
-                            RichMessageContent(
-                                content = content,
-                                modifier = Modifier.padding(12.dp),
-                            )
-                        } else {
-                            HtmlText(
-                                html = content.html,
-                                plainText = content.plainText,
-                                modifier = Modifier.padding(12.dp),
-                            )
-                        }
+                        // All text segments are merged into one selectable
+                        // HtmlText so selection can span headings, lists,
+                        // tables and code blocks.
+                        RichMessageContent(
+                            content = content,
+                            modifier = Modifier.padding(12.dp),
+                        )
                     }
                     is MessageContent.Image -> {
                         ImageMessageContent(
