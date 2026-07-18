@@ -103,22 +103,21 @@ class EventPushWorker @AssistedInject constructor(
         applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     override suspend fun doWork(): Result {
+        val workerStartedAt = android.os.SystemClock.elapsedRealtime()
         val events = pushEventStore.drain()
 
         Log.d(TAG, "doWork: draining ${events.size} events")
 
         if (events.isEmpty()) return Result.success()
 
-        // Resolve before grouping because event_id-only payloads may omit the thread root.
-        // resolveReplaceTargetViaIndex runs BEFORE SDK resolution: the local index is
-        // cheap and authoritative for events we've already observed via timeline diffs.
-        // When the index misses on an m.replace event, fall back to an SDK lookup on
-        // the replaced (target) event — that event is a plain m.thread message, so
-        // the SDK can reliably return its threadRootEventId (unlike the edit itself).
+        // Resolve only when the payload lacks a display body. Normal Matrix
+        // message pushes already carry body + m.thread root, so synchronously
+        // calling NotificationClient for every push just adds an avoidable
+        // network/FFI delay before the user sees a notification. m.replace
+        // still performs its separate target-root resolution below.
         val resolvedEvents = events.map { event ->
             val indexed = resolveReplaceTargetViaIndex(event)
-            val sdkResolved = resolveEvent(indexed)
-            sdkResolved ?: indexed
+            if (indexed.body.isNullOrBlank()) resolveEvent(indexed) ?: indexed else indexed
         }
         // Feed the index from every resolved event so future edits of these
         // events can be resolved locally. Covers the gap where the edited
@@ -131,37 +130,10 @@ class EventPushWorker @AssistedInject constructor(
             event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
         }
 
-        // A push is evidence that the server has newer room state. Refresh the
-        // app-scoped ThreadList even when this root already exists: presence
-        // only proves the session is known, not that latestEventId/replyCount
-        // are current. refreshForPush is single-flight, so a burst of pushes
-        // and discovery/timeline reconciliation still produces one reset.
-        val boundRoomId = settingsRepository.getBoundRoomId()
-        val activeKey = activeThreadStore.activeKey()
-        val hasBoundRoomPush = boundRoomId != null && byThread.keys.any { it.first == boundRoomId }
-        var activeThreadHit = false
-        if (hasBoundRoomPush) {
-            sessionRepository.refreshForPush(boundRoomId!!)
-            for ((key, _) in byThread) {
-                val eventRoomId = key.first
-                val threadRootId = key.second
-                // If the user is currently focused on this thread (app in
-                // foreground or timeline still warm in background), fill the
-                // focused TEC gap via /relations. Does NOT open a new focused
-                // timeline for push-only threads.
-                if (activeKey != null &&
-                    activeKey.roomId == eventRoomId &&
-                    activeKey.threadRootId == threadRootId
-                ) {
-                    activeThreadHit = true
-                }
-            }
-            if (activeThreadHit) {
-                Log.d(TAG, "doWork: push hits active thread $activeKey, catch-up refresh")
-                activeThreadStore.refreshActiveIfAny()
-            }
-        }
-
+        // Critical path: show the notification from the payload/cache first.
+        // Do NOT wait for ThreadList reset+pagination or /relations here;
+        // those network calls repair in-app state but must never postpone the
+        // alert the user receives.
         for ((key, threadEvents) in byThread) {
             val notificationId = stableSessionNotificationId(key.first, key.second)
             val latest = threadEvents.last()
@@ -169,35 +141,89 @@ class EventPushWorker @AssistedInject constructor(
             val title = resolveNotificationTitle(latest, threadRootId)
             showNotification(notificationId, latest, threadEvents.size, title)
         }
+        val firstReceivedAt = resolvedEvents.minOf { it.receivedAt }
+        Log.d(
+            TAG,
+            "doWork: notifications posted groups=${byThread.size} " +
+                "queueAgeMs=${System.currentTimeMillis() - firstReceivedAt} " +
+                "criticalPathMs=${android.os.SystemClock.elapsedRealtime() - workerStartedAt}"
+        )
+
+        // Non-critical reconciliation: a push is evidence that the server has
+        // newer room state. Refresh the app-scoped ThreadList even when this
+        // root already exists: presence only proves the session is known, not
+        // that latestEventId/replyCount are current. This runs AFTER posting;
+        // refreshForPush is single-flight, so a burst of pushes and
+        // discovery/timeline reconciliation still produces one reset.
+        refreshInAppStateAfterPush(byThread)
 
         return Result.success()
     }
 
     /**
-     * Resolve the user-visible title for a thread notification.
-     *
-     * Priority (mirrors ThreadList UI `customTitle ?: session.title`):
-     *  1. Local custom session title from [SettingsRepository.getSessionTitle].
-     *  2. In-memory session snapshot from the application-scoped
-     *     [SessionRepository.sessionsSnapshot] (fresher than the persisted
-     *     cache); falls back to the persisted [SettingsRepository.getSessionCache]
-     *     scoped to the event's room.
-     *  3. Body of the thread root event, formatted by [formatSessionTitle].
-     *  4. Literal `"Session"` — never the Matrix event id.
-     *
-     * When the latest event already IS the root (no thread), its body is reused
-     * to avoid a second SDK round-trip. The root body lookup also uses the SDK
-     * `NotificationClient` (same as event resolution) so `event_id_only` pushes
-     * still yield a meaningful title even when the payload lacks `content.body`.
-     * No focused timeline is opened for the push — only the shared
-     * [SessionRepository.refreshIfMissing] has run by this point.
-     *
-     * Each resolution logs its source (`custom` / `store` / `cache` / `sdk` /
-     * `fallback`) along with the thread root id — never the message body — so
-     * the path actually taken is verifiable from logcat without leaking push
-     * contents.
+     * Reconcile app state after notifications are already visible. This work
+     * deliberately remains inside the Worker (rather than an untracked
+     * coroutine) so WorkManager retains it while the app is backgrounded;
+     * it simply is no longer on the notification critical path.
      */
-    private suspend fun resolveNotificationTitle(
+    private suspend fun refreshInAppStateAfterPush(
+        byThread: Map<Pair<String, String>, List<EventPushEvent>>,
+    ) {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val boundRoomId = settingsRepository.getBoundRoomId()
+        val activeKey = activeThreadStore.activeKey()
+        val hasBoundRoomPush = boundRoomId != null && byThread.keys.any { it.first == boundRoomId }
+        if (!hasBoundRoomPush) return
+
+        var activeThreadHit = false
+        for ((key, _) in byThread) {
+            val eventRoomId = key.first
+            val threadRootId = key.second
+            if (activeKey != null &&
+                activeKey.roomId == eventRoomId &&
+                activeKey.threadRootId == threadRootId
+            ) {
+                activeThreadHit = true
+            }
+        }
+
+        try {
+            sessionRepository.refreshForPush(boundRoomId!!)
+            if (activeThreadHit) {
+                Log.d(TAG, "refreshAfterPush: active thread $activeKey, catch-up refresh")
+                activeThreadStore.refreshActiveIfAny()
+            }
+            Log.d(
+                TAG,
+                "refreshAfterPush: done activeThreadHit=$activeThreadHit " +
+                    "durationMs=${android.os.SystemClock.elapsedRealtime() - startedAt}"
+            )
+        } catch (e: Exception) {
+            // Notification was already posted. A reconciliation failure must
+            // not convert a delivered push into a WorkManager retry/duplicate
+            // alert; the next sync or push will attempt recovery again.
+            Log.w(TAG, "refreshAfterPush: state reconciliation failed", e)
+        }
+    }
+
+    /**
+     * Resolve the user-visible title without network/SDK I/O so notification
+     * posting remains bounded by local work.
+     *
+     * Priority mirrors ThreadList UI (`customTitle ?: session.title`):
+     *  1. Local custom title.
+     *  2. In-memory app-scoped session snapshot.
+     *  3. Persisted room-scoped session cache.
+     *  4. The payload body when the pushed event itself is the thread root.
+     *  5. Literal `"Session"` — never a Matrix event id.
+     *
+     * Deliberately does NOT call NotificationClient for a missing thread-root
+     * body. That lookup may require network / FFI and used to make a system
+     * notification wait behind an unbounded SDK request. The following
+     * refreshInAppStateAfterPush repairs the cache asynchronously for future
+     * pushes.
+     */
+    private fun resolveNotificationTitle(
         latest: EventPushEvent,
         threadRootId: String,
     ): String {
@@ -223,44 +249,10 @@ class EventPushWorker @AssistedInject constructor(
                 return it
             }
 
-        val rootBody = if (threadRootId == latest.eventId) {
-            latest.body
-        } else {
-            resolveThreadRootBody(latest.roomId, threadRootId)
-        }
-        val source = if (rootBody.isNullOrBlank()) "fallback" else "sdk"
+        val rootBody = latest.body?.takeIf { threadRootId == latest.eventId }
+        val source = if (rootBody.isNullOrBlank()) "fallback" else "payload-root"
         Log.d(TAG, "resolveNotificationTitle: source=$source root=$threadRootId")
         return formatSessionTitle(rootBody)
-    }
-
-    /**
-     * Resolve the thread root event body via the SDK `NotificationClient`.
-     *
-     * Returns null on any failure (no authenticated client, network error,
-     * redaction, not-found) so [formatSessionTitle] can fall back to "Session".
-     * The notification client is `AutoCloseable` and is closed here.
-     */
-    private suspend fun resolveThreadRootBody(roomId: String, threadRootId: String): String? {
-        return try {
-            val client = matrixRepository.getClient()
-                ?: matrixRepository.restoreSession()?.getOrNull()
-                ?: return null
-
-            val nc = client.notificationClient(NotificationProcessSetup.MultipleProcesses)
-            try {
-                when (val status = nc.getNotification(roomId, threadRootId)) {
-                    is NotificationStatus.Event -> extractBody(status.item)
-                    is NotificationStatus.EventFilteredOut,
-                    is NotificationStatus.EventNotFound,
-                    is NotificationStatus.EventRedacted -> null
-                }
-            } finally {
-                nc.close()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "resolveThreadRootBody: SDK lookup failed for $roomId:$threadRootId", e)
-            null
-        }
     }
 
     /**
@@ -450,13 +442,19 @@ class EventPushWorker @AssistedInject constructor(
     private fun showNotification(notificationId: Int, latest: EventPushEvent, count: Int, title: String) {
         val locale = LocaleManager.currentLocale()
         val threadRootId = latest.threadRootId?.takeIf { it.isNotBlank() } ?: latest.eventId
-        val fullBody = latest.body?.take(200) ?: ""
-
+        val payloadBody = latest.body?.take(200)?.takeIf { it.isNotBlank() }
+            ?: strEnZh(locale, "New message", "新消息")
+        val queuedForMs = System.currentTimeMillis() - latest.receivedAt
+        Log.d(
+            TAG,
+            "showNotification: queueAgeMs=$queuedForMs root=$threadRootId " +
+                "bodySource=${if (latest.body.isNullOrBlank()) "fallback" else "payload"}"
+        )
         val displayBody = when (latest.msgType) {
             "m.image", "m.video" -> strEnZh(locale, "[Image]", "[图片]")
             "m.audio" -> strEnZh(locale, "[Audio]", "[语音]")
             "m.file" -> strEnZh(locale, "[File]", "[文件]")
-            else -> fullBody
+            else -> payloadBody
         }
 
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
