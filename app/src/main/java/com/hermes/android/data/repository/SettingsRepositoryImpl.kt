@@ -294,25 +294,44 @@ class SettingsRepositoryImpl @Inject constructor(
         saveEventThreadRoots(roomId, mapOf(eventId to threadRootId))
     }
 
+    /**
+     * Process-wide lock serializing the index read-modify-write cycle.
+     *
+     * Three concurrent writers feed the index:
+     *  - [RoomSessionListStore.publishIfActive] (session list updates)
+     *  - [ActiveThreadImpl] diff stream (per-thread message ids)
+     *  - [EventPushWorker.indexResolvedEvents] (push-delivered events)
+     *
+     * Without serialization, two threads can read the same blob, each add
+     * their own entries, and the second `apply()` silently overwrites the
+     * first — losing entries. [indexLock] makes the read → update → write
+     * atomic across all callers. The critical section is short (one JSON
+     * parse + one LinkedHashMap build + one serialize), so contention is
+     * negligible.
+     */
+    private val indexLock = Any()
+
     override fun saveEventThreadRoots(roomId: String, mappings: Map<String, String>) {
         if (mappings.isEmpty()) return
-        val existing = readEventThreadRootIndex(roomId)
-        val updated = applyEventThreadRootUpdates(
-            existing = existing,
-            updates = mappings,
-            maxEntries = EVENT_THREAD_ROOT_MAX_PER_ROOM,
-        )
-        val json = JSONObject()
-        for ((k, v) in updated) {
-            json.put(k, v)
+        synchronized(indexLock) {
+            val existing = readEventThreadRootIndexLocked(roomId)
+            val updated = applyEventThreadRootUpdates(
+                existing = existing,
+                updates = mappings,
+                maxEntries = EVENT_THREAD_ROOT_MAX_PER_ROOM,
+            )
+            val json = JSONObject()
+            for ((k, v) in updated) {
+                json.put(k, v)
+            }
+            prefs.edit().putString(eventThreadRootKey(roomId), json.toString()).apply()
         }
-        prefs.edit().putString(eventThreadRootKey(roomId), json.toString()).apply()
     }
 
     override fun getEventThreadRoot(roomId: String, eventId: String): String? =
-        readEventThreadRootIndex(roomId)[eventId]
+        synchronized(indexLock) { readEventThreadRootIndexLocked(roomId)[eventId] }
 
-    private fun readEventThreadRootIndex(roomId: String): Map<String, String> = try {
+    private fun readEventThreadRootIndexLocked(roomId: String): Map<String, String> = try {
         val json = prefs.getString(eventThreadRootKey(roomId), null) ?: return emptyMap()
         val obj = JSONObject(json)
         // Build a LinkedHashMap so iteration order reflects file order (which

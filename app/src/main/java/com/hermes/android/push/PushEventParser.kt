@@ -40,16 +40,26 @@ class PushEventParser {
         return try {
             val jsonStr = String(jsonBytes, Charsets.UTF_8)
             val json = JSONObject(jsonStr)
-            val notification = json.optJSONObject("notification") ?: return null
+            val notification = json.optJSONObject("notification") ?: run {
+                Log.d(TAG, "filter: no notification object")
+                return null
+            }
 
             val roomId = notification.optString("room_id", "")
-            if (roomId.isBlank()) return null  // Need a room to route the notification.
+            if (roomId.isBlank()) {
+                Log.d(TAG, "filter: blank room_id")
+                return null
+            }
 
             val eventId = notification.optString("event_id", "")
-            if (eventId.isBlank()) return null  // Dedup and SDK resolution need eventId.
+            if (eventId.isBlank()) {
+                Log.d(TAG, "filter: blank event_id room=$roomId")
+                return null
+            }
 
             // Filter: only notify for the bound room.
             if (boundRoomId != null && roomId != boundRoomId) {
+                Log.d(TAG, "filter: not bound room eventId=$eventId room=$roomId")
                 return null
             }
 
@@ -58,6 +68,7 @@ class PushEventParser {
             // event_id_only payloads may omit type; in that case defer to the
             // worker to decide after SDK resolution.
             if (type.isNotBlank() && type != "m.room.message") {
+                Log.d(TAG, "filter: non-message type=$type eventId=$eventId")
                 return null
             }
 
@@ -72,9 +83,11 @@ class PushEventParser {
             // edited) so the worker can look up the parent thread root via
             // the local event→thread-root index. Only set when the relation
             // is m.replace; m.thread already populates threadRootId.
+            val relType = content?.optJSONObject("m.relates_to")?.optString("rel_type", "")
+            val isReplace = relType == "m.replace"
             val replaceTargetId = content
                 ?.optJSONObject("m.relates_to")
-                ?.takeIf { it.optString("rel_type", "") == "m.replace" }
+                ?.takeIf { isReplace }
                 ?.optString("event_id", "")
                 ?.ifBlank { null }
 
@@ -84,12 +97,23 @@ class PushEventParser {
             if (rawBody.isNotBlank()) {
                 val firstLine = rawBody.lineSequence().firstOrNull()?.trim() ?: ""
                 if (firstLine.isNotBlank() && shouldSkipByFirstLine(firstLine, timeoutMinutes)) {
+                    Log.d(
+                        TAG,
+                        "filter: firstLine skip eventId=$eventId isReplace=$isReplace " +
+                            "firstLine=${firstLine.take(40)}"
+                    )
                     return null
                 }
             }
 
             val sender = notification.optString("sender_display_name", "")
                 .ifBlank { notification.optString("sender", "") }
+
+            Log.d(
+                TAG,
+                "parseAndFilter: accept eventId=$eventId isReplace=$isReplace " +
+                    "target=$replaceTargetId root=$threadRootId"
+            )
 
             EventPushEvent(
                 roomId = roomId,
