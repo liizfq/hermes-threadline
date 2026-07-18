@@ -58,6 +58,9 @@ class SessionRepositoryImpl @Inject constructor(
     override suspend fun refreshIfMissing(roomId: String, threadRootId: String?): Boolean =
         sessionListStore.refreshIfMissing(roomId, threadRootId)
 
+    override suspend fun refreshForPush(roomId: String): Boolean =
+        sessionListStore.refreshForPush(roomId)
+
     override suspend fun refreshSessions() {
         sessionListStore.refresh()
     }

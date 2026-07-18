@@ -45,13 +45,15 @@ class RoomSessionListStoreLifecycleTest {
         // The store is application-scoped: nothing in its public API tracks
         // collector counts or lets a caller tear it down implicitly. UI
         // collector churn cannot close the pipeline — the only mutating
-        // methods are ensureStarted, refresh, refreshIfMissing, shutdown.
+        // methods are ensureStarted, refresh, refreshIfMissing, refreshForPush,
+        // shutdown.
         val publicMethods = RoomSessionListStore::class.java.methods
             .map { it.name }
             .toSet()
         assertTrue(publicMethods.contains("ensureStarted"))
         assertTrue(publicMethods.contains("refresh"))
         assertTrue(publicMethods.contains("refreshIfMissing"))
+        assertTrue(publicMethods.contains("refreshForPush"))
         assertTrue(publicMethods.contains("shutdown"))
         val forbidden = listOf("release", "close", "decrement", "unsubscribe", "detach", "stop")
         val leaked = forbidden.filter { it in publicMethods }

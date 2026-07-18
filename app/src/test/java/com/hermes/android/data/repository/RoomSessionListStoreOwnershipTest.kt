@@ -303,6 +303,23 @@ class RoomSessionListStoreOwnershipTest {
     }
 
     @Test
+    fun `refreshForPush refreshes even when session root is already present`() = runBlocking {
+        val settings = FakeSettingsRepository()
+        val store = RoomSessionListStore(settings, Dispatchers.Unconfined)
+
+        val room = FakeRoom()
+        val service = FakeThreadListService().also { room.service = it }
+        assertTrue(store.ensureStarted(room, ROOM_A))
+
+        // Presence must not suppress this refresh: a known root can still
+        // have stale latestEventId/replyCount when SDK sync was delayed.
+        settings.saveSessionCache(ROOM_A, listOf(sessionFor(PRESENT_THREAD_ROOT, "present")))
+
+        assertTrue(store.refreshForPush(ROOM_A))
+        assertEquals(1, service.resetCount.get(), "push must refresh known session summaries")
+    }
+
+    @Test
     fun `refreshIfMissing returns false when room does not match`() = runBlocking {
         val store = RoomSessionListStore(FakeSettingsRepository(), Dispatchers.Unconfined)
         val room = FakeRoom()

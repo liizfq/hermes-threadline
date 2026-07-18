@@ -131,29 +131,29 @@ class EventPushWorker @AssistedInject constructor(
             event.roomId to (event.threadRootId?.takeIf { it.isNotBlank() } ?: event.eventId)
         }
 
-        // For events targeting the bound room, let the application-scoped store
-        // pick up any thread roots that haven't propagated into the cache yet.
-        // Awaits each shared refresh so this round's title resolution sees the
-        // refreshed snapshot / cache.
+        // A push is evidence that the server has newer room state. Refresh the
+        // app-scoped ThreadList even when this root already exists: presence
+        // only proves the session is known, not that latestEventId/replyCount
+        // are current. refreshForPush is single-flight, so a burst of pushes
+        // and discovery/timeline reconciliation still produces one reset.
         val boundRoomId = settingsRepository.getBoundRoomId()
         val activeKey = activeThreadStore.activeKey()
+        val hasBoundRoomPush = boundRoomId != null && byThread.keys.any { it.first == boundRoomId }
         var activeThreadHit = false
-        if (boundRoomId != null) {
+        if (hasBoundRoomPush) {
+            sessionRepository.refreshForPush(boundRoomId!!)
             for ((key, _) in byThread) {
                 val eventRoomId = key.first
                 val threadRootId = key.second
-                if (eventRoomId == boundRoomId) {
-                    sessionRepository.refreshIfMissing(boundRoomId, threadRootId)
-                    // If the user is currently focused on this thread (app in
-                    // foreground or timeline still warm in background), fill
-                    // the focused TEC gap via /relations. Does NOT open a new
-                    // focused timeline for push-only threads.
-                    if (activeKey != null &&
-                        activeKey.roomId == boundRoomId &&
-                        activeKey.threadRootId == threadRootId
-                    ) {
-                        activeThreadHit = true
-                    }
+                // If the user is currently focused on this thread (app in
+                // foreground or timeline still warm in background), fill the
+                // focused TEC gap via /relations. Does NOT open a new focused
+                // timeline for push-only threads.
+                if (activeKey != null &&
+                    activeKey.roomId == eventRoomId &&
+                    activeKey.threadRootId == threadRootId
+                ) {
+                    activeThreadHit = true
                 }
             }
             if (activeThreadHit) {

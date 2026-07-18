@@ -34,13 +34,21 @@ interface SessionRepository {
     fun sessionsSnapshot(): List<Session>
 
     /**
-     * Push-pipeline helper. Returns true iff [roomId] is the active room and
-     * the store can serve the push. When [threadRootId] is missing from the
-     * current sessions, awaits a single shared refresh for the captured
-     * instance before returning, so the caller's subsequent snapshot / cache
-     * read observes the refreshed data.
+     * Push-pipeline helper for a thread root that may not yet be present in
+     * the session list. Returns true iff [roomId] is the active room. Only
+     * refreshes when the root is absent; use [refreshForPush] for ordinary
+     * message pushes to an already-known session.
      */
     suspend fun refreshIfMissing(roomId: String, threadRootId: String?): Boolean
+
+    /**
+     * Push-pipeline catch-up for an event in [roomId]. Returns true iff the
+     * application-scoped store is actively bound to that room. Always awaits
+     * one coalesced ThreadList reset + pagination, even when the target root
+     * is already present: presence proves the session exists, not that its
+     * latest-event summary is current.
+     */
+    suspend fun refreshForPush(roomId: String): Boolean
 
     suspend fun refreshSessions()
     suspend fun createSession(room: Room, content: String): Result<String>

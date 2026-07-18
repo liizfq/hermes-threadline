@@ -442,6 +442,7 @@ internal class FakeSessionRepository : SessionRepository {
     override fun observeSessions(): Flow<List<com.hermes.android.domain.model.Session>> = sessions.asStateFlow()
     override fun sessionsSnapshot(): List<com.hermes.android.domain.model.Session> = sessions.value
     override suspend fun refreshIfMissing(roomId: String, threadRootId: String?): Boolean = false
+    override suspend fun refreshForPush(roomId: String): Boolean = false
     override suspend fun refreshSessions() {}
     override suspend fun createSession(room: Room, content: String): Result<String> = Result.success("")
     override suspend fun createSession(

@@ -505,6 +505,20 @@ class RoomSessionListStore internal constructor(
     }
 
     /**
+     * Push-pipeline catch-up. Unlike [refreshIfMissing], this always refreshes
+     * when [roomId] is the active room: an already-present root only proves
+     * that a session exists, not that its `latestEventId` / reply count has
+     * caught up to the just-received push. All simultaneous push workers and
+     * discovery/timeline callers share [runRefreshSingleFlight].
+     */
+    suspend fun refreshForPush(roomId: String): Boolean {
+        val instance = synchronized(stateLock) { _active } ?: return false
+        if (instance.closed || instance.roomId != roomId) return false
+        runRefreshSingleFlight(instance)
+        return true
+    }
+
+    /**
      * Tear down the active pipeline. Used on logout / explicit teardown. Safe
      * to call repeatedly; a no-op when nothing is active.
      */
