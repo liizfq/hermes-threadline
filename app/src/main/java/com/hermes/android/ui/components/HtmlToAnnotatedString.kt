@@ -1,12 +1,5 @@
 package com.hermes.android.ui.components
 
-import android.text.Spanned
-import android.text.style.ForegroundColorSpan
-import android.text.style.StrikethroughSpan
-import android.text.style.StyleSpan
-import android.text.style.TypefaceSpan
-import android.text.style.URLSpan
-import android.text.style.UnderlineSpan
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -18,10 +11,11 @@ import androidx.compose.ui.text.style.TextDecoration
 import com.hermes.android.ui.theme.AgentColors
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
 
 /**
- * Converts inline HTML to Compose [AnnotatedString] using Android's
- * [android.text.Html.fromHtml()].
+ * Converts inline HTML to Compose [AnnotatedString] using Jsoup for parsing.
  *
  * Handles:
  * - [b], [strong] → bold
@@ -32,101 +26,40 @@ import org.jsoup.nodes.Element
  * - [a href] → link colour + underline + URL annotation
  * - [br] → newline
  * - [span] → preserved text
+ * - [ul]/[ol]/[li] → bulleted/numbered lists
  *
- * List blocks ([ul]/[ol]/[li]) are handled specially by prefixing each item
- * with a bullet or number.
+ * The HTML is parsed once with Jsoup, then traversed as a DOM tree to build
+ * the [AnnotatedString]. This avoids the previous O(n²) behavior where each
+ * recursive call re-parsed the HTML.
  */
 fun htmlToAnnotatedString(
     html: String,
     baseColor: Color = AgentColors.TextPrimary,
     linkColor: Color = AgentColors.AccentBlue,
 ): AnnotatedString {
-    if (html.contains("<li>", ignoreCase = true)) {
-        return parseListHtml(html, baseColor, linkColor)
-    }
-
-    val spanned = android.text.Html.fromHtml(
-        html.ifBlank { "" },
-        android.text.Html.FROM_HTML_MODE_COMPACT,
-    )
-
+    val doc = Jsoup.parseBodyFragment(html.ifBlank { "" })
     return buildAnnotatedString {
-        append(spanned.toString())
-        spanned.getSpans(0, spanned.length, Any::class.java).forEach { span ->
-            val start = spanned.getSpanStart(span)
-            val end = spanned.getSpanEnd(span)
-            if (start < 0 || end <= start || start >= length) return@forEach
-            val clampedEnd = end.coerceAtMost(length)
-            when (span) {
-                is StyleSpan -> applyStyleSpan(span, start, clampedEnd)
-                is UnderlineSpan -> addStyle(
-                    SpanStyle(textDecoration = TextDecoration.Underline),
-                    start,
-                    clampedEnd,
-                )
-                is StrikethroughSpan -> addStyle(
-                    SpanStyle(textDecoration = TextDecoration.LineThrough),
-                    start,
-                    clampedEnd,
-                )
-                is TypefaceSpan -> if (span.family == "monospace") {
-                    addStyle(
-                        SpanStyle(fontFamily = FontFamily.Monospace),
-                        start,
-                        clampedEnd,
-                    )
-                }
-                is ForegroundColorSpan -> addStyle(
-                    SpanStyle(color = Color(span.foregroundColor)),
-                    start,
-                    clampedEnd,
-                )
-                is URLSpan -> {
-                    addStyle(
-                        SpanStyle(
-                            color = linkColor,
-                            textDecoration = TextDecoration.Underline,
-                        ),
-                        start,
-                        clampedEnd,
-                    )
-                    addStringAnnotation(
-                        tag = URL_ANNOTATION_TAG,
-                        annotation = span.url,
-                        start = start,
-                        end = clampedEnd,
-                    )
-                }
-            }
+        doc.body().childNodes().forEach { node ->
+            renderNode(node, 0, baseColor, linkColor, null)
         }
     }
 }
 
-private fun AnnotatedString.Builder.applyStyleSpan(span: StyleSpan, start: Int, end: Int) {
-    val style = when (span.style) {
-        android.graphics.Typeface.BOLD -> SpanStyle(fontWeight = FontWeight.Bold)
-        android.graphics.Typeface.ITALIC -> SpanStyle(fontStyle = FontStyle.Italic)
-        android.graphics.Typeface.BOLD_ITALIC -> SpanStyle(
-            fontWeight = FontWeight.Bold,
-            fontStyle = FontStyle.Italic,
-        )
-        else -> return
-    }
-    addStyle(style, start, end)
-}
-
-private fun parseListHtml(
-    html: String,
+private fun AnnotatedString.Builder.renderNode(
+    node: Node,
+    indentLevel: Int,
     baseColor: Color,
     linkColor: Color,
-): AnnotatedString = buildAnnotatedString {
-    val doc = Jsoup.parseBodyFragment(html)
-    doc.body().children().forEach { element ->
-        renderListElement(element, 0, baseColor, linkColor, null)
+    listNumber: Int?,
+) {
+    when (node) {
+        is TextNode -> append(node.text())
+        is Element -> renderElement(node, indentLevel, baseColor, linkColor, listNumber)
+        else -> append(node.outerHtml())
     }
 }
 
-private fun AnnotatedString.Builder.renderListElement(
+private fun AnnotatedString.Builder.renderElement(
     element: Element,
     indentLevel: Int,
     baseColor: Color,
@@ -136,24 +69,91 @@ private fun AnnotatedString.Builder.renderListElement(
     when (element.tagName().lowercase()) {
         "ul" -> {
             element.children().forEach { child ->
-                renderListElement(child, indentLevel + 1, baseColor, linkColor, null)
+                renderElement(child, indentLevel + 1, baseColor, linkColor, null)
             }
         }
         "ol" -> {
             element.children().forEachIndexed { index, child ->
-                renderListElement(child, indentLevel + 1, baseColor, linkColor, index + 1)
+                renderElement(child, indentLevel + 1, baseColor, linkColor, index + 1)
             }
         }
         "li" -> {
             append(" ".repeat(indentLevel * 2))
             val marker = if (listNumber != null) "$listNumber. " else "• "
             append(marker)
-            val childHtml = element.html()
-            append(htmlToAnnotatedString(childHtml, baseColor, linkColor))
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, listNumber)
+            }
             append("\n")
         }
+        "p", "div" -> {
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            append("\n")
+        }
+        "br" -> append("\n")
+        "b", "strong" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(SpanStyle(fontWeight = FontWeight.Bold), start, length)
+        }
+        "i", "em" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(SpanStyle(fontStyle = FontStyle.Italic), start, length)
+        }
+        "u" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(SpanStyle(textDecoration = TextDecoration.Underline), start, length)
+        }
+        "del", "s" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(SpanStyle(textDecoration = TextDecoration.LineThrough), start, length)
+        }
+        "code" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(SpanStyle(fontFamily = FontFamily.Monospace), start, length)
+        }
+        "a" -> {
+            val start = length
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
+            addStyle(
+                SpanStyle(
+                    color = linkColor,
+                    textDecoration = TextDecoration.Underline,
+                ),
+                start,
+                length,
+            )
+            element.attr("href").takeIf { it.isNotEmpty() }?.let { href ->
+                addStringAnnotation(
+                    tag = URL_ANNOTATION_TAG,
+                    annotation = href,
+                    start = start,
+                    end = length,
+                )
+            }
+        }
         else -> {
-            append(htmlToAnnotatedString(element.outerHtml(), baseColor, linkColor))
+            element.childNodes().forEach { node ->
+                renderNode(node, indentLevel, baseColor, linkColor, null)
+            }
         }
     }
 }
