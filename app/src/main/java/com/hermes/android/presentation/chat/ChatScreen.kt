@@ -98,6 +98,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.window.PopupProperties
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -826,7 +827,8 @@ fun ChatInputBar(
                     }
                     DropdownMenu(
                         expanded = showAttachmentMenu,
-                        onDismissRequest = { showAttachmentMenu = false }
+                        onDismissRequest = { showAttachmentMenu = false },
+                        properties = PopupProperties(focusable = false)
                     ) {
                         DropdownMenuItem(
                             text = { Text(strEnZh("Send file", "发送文件")) },

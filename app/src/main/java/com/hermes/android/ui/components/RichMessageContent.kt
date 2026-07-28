@@ -44,7 +44,10 @@ fun RichMessageContent(
     modifier: Modifier = Modifier,
 ) {
     SelectionContainer {
-        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             for (segment in content.segments) {
                 when (segment) {
                     is MessageSegment.Text -> {

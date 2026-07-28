@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.hermes.android.ui.settings.LocaleManager
@@ -176,7 +177,8 @@ fun NewSessionScreen(
                     }
                     DropdownMenu(
                         expanded = showAttachmentMenu,
-                        onDismissRequest = { showAttachmentMenu = false }
+                        onDismissRequest = { showAttachmentMenu = false },
+                        properties = PopupProperties(focusable = false)
                     ) {
                         DropdownMenuItem(
                             text = { Text(strEnZh("Send image", "发送图像")) },
