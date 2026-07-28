@@ -666,11 +666,9 @@ private fun MessageBubble(
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
             modifier = Modifier.fillMaxWidth(bubbleMaxWidthFraction)
         ) {
-            Surface(
-                shape = bubbleShape,
-                color = bubbleColor,
-                shadowElevation = 1.dp,
-                modifier = bubbleClickModifier,
+            Box(
+                modifier = bubbleClickModifier
+                    .background(color = bubbleColor, shape = bubbleShape)
             ) {
                 when (val content = message.content) {
                     is MessageContent.Text -> {
