@@ -3,7 +3,49 @@ package com.hermes.android.data.repository
 import com.hermes.android.domain.model.Session
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * Multi-room support: a user-selected set of rooms that receive push and
+ * appear in the main-page drawer. The active room is always one of these;
+ * [resolveActiveRoomId] is the launch-time entry point that picks it.
+ *
+ * Boundary (2026-07-29):
+ *  - Active is still a single room; the push set only governs "push scope +
+ *    drawer candidates".
+ *  - Historical `bound_room_id` is NOT auto-added to the set; the user opts
+ *    rooms in via Settings.
+ *  - [setActiveRoom] is strictly constrained: it only accepts a roomId that
+ *    is already in the push set, otherwise it logs and no-ops (preserving
+ *    the prior value). It never throws.
+ */
 interface SettingsRepository {
+
+    /** The user-selected push/drawer room set (possibly empty). */
+    fun getPushRoomIds(): Set<String>
+
+    /** Observe the push room set; re-emits on every [replacePushRoomIds]. */
+    fun observePushRoomIds(): Flow<Set<String>>
+
+    /**
+     * Overwrite the push room set with [ids]. Persists and emits. An empty
+     * set is allowed (the prefs key is removed) and coexists with a leftover
+     * `bound_room_id` as a fallback.
+     */
+    suspend fun replacePushRoomIds(ids: Set<String>)
+
+    /**
+     * Set the active room to [roomId]. No-op (with a warning log) when
+     * [roomId] is not in the push set; never throws. Mutating the active
+     * room does NOT mutate the push set.
+     */
+    suspend fun setActiveRoom(roomId: String)
+
+    /**
+     * Launch-time active room resolution:
+     *  - `bound_room_id` if it is non-null AND present in the push set;
+     *  - else the first element of the push set, if any;
+     *  - else null.
+     */
+    fun resolveActiveRoomId(): String?
     fun getHomeserverUrl(): String?
     fun getUserId(): String?
     fun getAccessToken(): String?
@@ -50,7 +92,7 @@ interface SettingsRepository {
 
     /**
      * Persist an `eventId -> threadRootId` mapping for [roomId]. Populated
-     * from live timeline observation (RoomSessionListStore.publishIfActive and
+     * from live timeline observation (RoomSessionListStore.publish and
      * ActiveThreadImpl diffs). Used by the push worker to resolve m.replace
      * events to their parent thread root without an SDK round-trip.
      *
@@ -62,7 +104,7 @@ interface SettingsRepository {
 
     /**
      * Batch variant: persists multiple mappings for [roomId] in one write.
-     * Used by RoomSessionListStore.publishIfActive which already has the full
+     * Used by RoomSessionListStore.publish which already has the full
      * session list. Each entry updates LRU recency.
      */
     fun saveEventThreadRoots(roomId: String, mappings: Map<String, String>)

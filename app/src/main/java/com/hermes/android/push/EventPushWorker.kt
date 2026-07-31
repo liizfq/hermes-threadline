@@ -166,15 +166,35 @@ class EventPushWorker @AssistedInject constructor(
      * coroutine) so WorkManager retains it while the app is backgrounded;
      * it simply is no longer on the notification critical path.
      */
+    /**
+     * Multi-room reconciliation scope (design §3.1): a push is evidence that
+     * the server has newer room state, so we refresh **every** room in the
+     * user's push set — not only the room the push was for. Each call coalesces
+     * via [RoomSessionListStore]'s per-instance single-flight, so a burst of
+     * pushes still produces at most one reset+pagination per room (design §7).
+     *
+     * Push-set fallback: when the worker fires before the push set is
+     * initialized (fresh install, settings not yet loaded), it falls back to
+     * the legacy single bound room so pushes still reconcile in the
+     * single-room case.
+     *
+     * This runs AFTER notifications are posted; a failure here must never
+     * turn a delivered push into a WorkManager retry/duplicate alert.
+     */
     private suspend fun refreshInAppStateAfterPush(
         byThread: Map<Pair<String, String>, List<EventPushEvent>>,
     ) {
         val startedAt = android.os.SystemClock.elapsedRealtime()
-        val boundRoomId = settingsRepository.getBoundRoomId()
-        val activeKey = activeThreadStore.activeKey()
-        val hasBoundRoomPush = boundRoomId != null && byThread.keys.any { it.first == boundRoomId }
-        if (!hasBoundRoomPush) return
 
+        // The rooms we serve: the push set, or the legacy bound room when the
+        // set is empty (worker may run before the set is populated).
+        val rooms = effectiveRefreshRooms()
+        if (rooms.isEmpty()) return
+
+        // Detect whether any pushed thread is the currently focused one, so we
+        // can also catch up its focused timeline (/relations) regardless of
+        // which room's ThreadList we refresh.
+        val activeKey = activeThreadStore.activeKey()
         var activeThreadHit = false
         for ((key, _) in byThread) {
             val eventRoomId = key.first
@@ -188,14 +208,20 @@ class EventPushWorker @AssistedInject constructor(
         }
 
         try {
-            sessionRepository.refreshForPush(boundRoomId!!)
+            for (roomId in rooms) {
+                // refreshForPush returns false when no store instance is
+                // started for this room yet (worker raced ahead of login /
+                // maybeStartSessionStore); that is benign — the notification is
+                // already posted and the next sync/push recovers.
+                sessionRepository.refreshForPush(roomId)
+            }
             if (activeThreadHit) {
                 Log.d(TAG, "refreshAfterPush: active thread $activeKey, catch-up refresh")
                 activeThreadStore.refreshActiveIfAny()
             }
             Log.d(
                 TAG,
-                "refreshAfterPush: done activeThreadHit=$activeThreadHit " +
+                "refreshAfterPush: done rooms=${rooms.size} activeThreadHit=$activeThreadHit " +
                     "durationMs=${android.os.SystemClock.elapsedRealtime() - startedAt}"
             )
         } catch (e: Exception) {
@@ -204,6 +230,17 @@ class EventPushWorker @AssistedInject constructor(
             // alert; the next sync or push will attempt recovery again.
             Log.w(TAG, "refreshAfterPush: state reconciliation failed", e)
         }
+    }
+
+    /**
+     * The rooms to reconcile after a push: the user's push set, falling back to
+     * the legacy single bound room when the set is empty (design §3.1, §2.1).
+     */
+    private fun effectiveRefreshRooms(): Set<String> {
+        val pushRooms = settingsRepository.getPushRoomIds()
+        if (pushRooms.isNotEmpty()) return pushRooms
+        val bound = settingsRepository.getBoundRoomId() ?: return emptySet()
+        return setOf(bound)
     }
 
     /**

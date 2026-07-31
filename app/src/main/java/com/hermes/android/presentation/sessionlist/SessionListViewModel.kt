@@ -5,7 +5,10 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hermes.android.data.repository.ActiveThreadStore
+import com.hermes.android.data.repository.MatrixRepository
 import com.hermes.android.data.repository.RoomRepository
+import com.hermes.android.data.repository.RoomSessionListStore
 import com.hermes.android.data.repository.SessionRepository
 import com.hermes.android.data.repository.SettingsRepository
 import com.hermes.android.domain.model.Session
@@ -21,11 +24,20 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 private const val TAG = "SessionListVM"
 
+/** A push-set room surfaced in the SessionListScreen navigation drawer. */
+data class RoomDrawerItem(
+    val roomId: String,
+    val displayName: String
+)
+
 @HiltViewModel
 class SessionListViewModel @Inject constructor(
     private val sessionRepository: SessionRepository,
     private val roomRepository: RoomRepository,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val matrixRepository: MatrixRepository,
+    private val roomSessionListStore: RoomSessionListStore,
+    private val activeThreadStore: ActiveThreadStore
 ) : ViewModel() {
 
     val searchQuery = MutableStateFlow("")
@@ -33,6 +45,68 @@ class SessionListViewModel @Inject constructor(
 
     val boundRoomId: StateFlow<String?> = settingsRepository.observeBoundRoom()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), settingsRepository.getBoundRoomId())
+
+    /**
+     * Push-set rooms shown in the navigation drawer. The displayName map is
+     * rebuilt from the SDK client's joined-room list whenever the push set
+     * changes; [Room.id] is the fallback when displayName is null/blank.
+     */
+    val drawerRooms: StateFlow<List<RoomDrawerItem>> = settingsRepository.observePushRoomIds()
+        .map { ids -> resolveRoomNames(ids) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Display name of the currently active room (fallback: app title / roomId). */
+    val activeRoomDisplayName: StateFlow<String> = settingsRepository.observeBoundRoom()
+        .map { id -> resolveRoomName(id) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            settingsRepository.getBoundRoomId()?.let { resolveRoomName(it) }
+                ?: "Hermes Threadline"
+        )
+
+    /**
+     * Resolve a room's display name from the SDK client's joined rooms.
+     * Returns the roomId when the room can't be found (cold client, left
+     * room) so the user always sees a non-empty identifier.
+     */
+    private fun resolveRoomName(roomId: String?): String {
+        if (roomId == null) return "Hermes Threadline"
+        val room = runCatching {
+            matrixRepository.getClient()?.rooms()?.firstOrNull { it.id() == roomId }
+        }.getOrNull()
+        return room?.displayName()?.takeIf { it.isNotBlank() } ?: roomId
+    }
+
+    /** Build the drawer list, preserving the push set's iteration order. */
+    private fun resolveRoomNames(ids: Set<String>): List<RoomDrawerItem> {
+        val rooms = runCatching {
+            matrixRepository.getClient()?.rooms().orEmpty()
+        }.getOrNull().orEmpty()
+        val byId = rooms.associateBy { it.id() }
+        return ids.map { id ->
+            RoomDrawerItem(
+                roomId = id,
+                displayName = byId[id]?.displayName()?.takeIf { it.isNotBlank() } ?: id
+            )
+        }
+    }
+
+    /**
+     * Switch the active room to [roomId]. Chains the three phase-A primitives:
+     * persist active room (no-op if not in push set) → switch the session
+     * projection → close the now-stale thread timeline. The [sessions] flow
+     * recomputes from [settingsRepository.observeBoundRoom] when the active
+     * room id actually changes.
+     */
+    fun setActiveRoom(roomId: String) {
+        viewModelScope.launch {
+            if (roomId == settingsRepository.getBoundRoomId()) return@launch
+            settingsRepository.setActiveRoom(roomId)
+            roomSessionListStore.setActiveProjection(roomId)
+            activeThreadStore.closeActive()
+        }
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val sessions: StateFlow<UiState<List<Session>>> = settingsRepository.observeBoundRoom()

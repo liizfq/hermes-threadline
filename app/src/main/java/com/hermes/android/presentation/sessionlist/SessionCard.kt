@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material3.*
@@ -49,6 +50,18 @@ fun SessionCard(
     val revealWidthPx = with(density) { 80.dp.toPx() }
     val offsetX = remember(session.id) { Animatable(0f) }
     val scope = rememberCoroutineScope()
+
+    // Visual differentiation for non-thread "card" sessions (single messages):
+    // a distinct icon + secondary palette so cards read differently from
+    // thread sessions without being loud. Thread sessions keep the hash-based
+    // palette + Email icon.
+    val displayTitle = customTitle ?: session.title
+    val avatarColor = if (session.isCard) {
+        Color(0xFFE53935)
+    } else {
+        sessionIconColor(displayTitle)
+    }
+    val avatarIcon = if (session.isCard) Icons.Default.Article else Icons.Default.Email
 
     Box(
         modifier = Modifier
@@ -109,16 +122,15 @@ fun SessionCard(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val displayTitle = customTitle ?: session.title
                 Box(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(sessionIconColor(displayTitle)),
+                        .background(avatarColor),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Email,
+                        imageVector = avatarIcon,
                         contentDescription = null,
                         tint = Color.White,
                         modifier = Modifier.size(22.dp)

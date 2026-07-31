@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.matrix.rustcomponents.sdk.ThreadListEntriesListener
@@ -66,11 +67,11 @@ class RoomSessionListStoreOwnershipTest {
     }
 
     @Test
-    fun `switch detaches old instance and closes its native handles`() {
-        // I1 + C1: room switch must tear down the previous pipeline. Native
-        // teardown (handle.destroy, service.close, room.close, scope.cancel)
-        // happens outside stateLock but is observable here as "old handle is
-        // closed at the end".
+    fun `ensureStarted for a second room does NOT teardown the first room`() {
+        // Multi-instance (design §2.2): ensureStarted does NOT teardown other
+        // rooms. Starting room B while A is active leaves A's pipeline alive
+        // (A simply stops being the active projection). Both rooms coexist in
+        // the store.
         val store = RoomSessionListStore(FakeSettingsRepository(), Dispatchers.Unconfined)
 
         val roomA = FakeRoom()
@@ -79,82 +80,68 @@ class RoomSessionListStoreOwnershipTest {
 
         val roomB = FakeRoom()
         val tookB = store.ensureStarted(roomB, ROOM_B)
-        assertTrue(tookB, "Switch path must take ownership of the new handle")
+        assertTrue(tookB, "Start path must take ownership of the new handle")
 
-        // Old pipeline is torn down.
-        assertTrue(serviceA.closeCount.get() >= 1, "old service must be closed")
-        assertTrue(roomA.closeCount.get() >= 1, "old room must be closed")
+        // Old pipeline is NOT torn down — A stays alive as a background instance.
+        assertEquals(0, serviceA.closeCount.get(), "old service must NOT be closed (multi-instance)")
+        assertEquals(0, roomA.closeCount.get(), "old room must NOT be closed (multi-instance)")
+        assertNotNull(store.sessionsForRoom(ROOM_A), "A's per-room flow must still exist")
+        assertNotNull(store.sessionsForRoom(ROOM_B), "B's per-room flow must exist")
     }
 
     @Test
-    fun `switch marks old instance closed under stateLock to close the discovery race`() {
-        // Regression for stale-rejection invariant: the discovery / refresh
-        // paths gate on `instance.closed`, NOT on `_active === instance`.
-        // Switch must therefore call markClosed() UNDER stateLock, before
-        // teardownUnlocked releases the SDK handles — otherwise an in-flight
-        // discovery callback could schedule a refresh against the old
-        // service in the window between detach and scope.cancel.
-        val store = RoomSessionListStore(FakeSettingsRepository(), Dispatchers.Unconfined)
+    fun `switching the active room keeps A alive and re-points the projection at B`() {
+        // Multi-instance: ensureStarted(B) does NOT close A; it only moves the
+        // active projection to B. The public `sessions` flow must reflect B,
+        // not A. (The stale-callback isolation this used to enforce via
+        // markClosed is now enforced by projection gating — covered by
+        // `stale items listener does NOT publish after a switch to a new room`.)
+        val settings = FakeSettingsRepository()
+        val store = RoomSessionListStore(settings, Dispatchers.Unconfined)
 
-        val roomA = FakeRoom()
-        assertTrue(store.ensureStarted(roomA, ROOM_A))
+        val aSession = sessionFor("\$a1", "session A")
+        settings.saveSessionCache(ROOM_A, listOf(aSession))
+        val bSession = sessionFor("\$b1", "session B")
+        settings.saveSessionCache(ROOM_B, listOf(bSession))
 
-        val instanceA = readActiveInstance(store)
-            ?: error("expected active instance after ensureStarted")
+        assertTrue(store.ensureStarted(FakeRoom(), ROOM_A))
+        assertEquals(listOf(aSession), store.sessionsSnapshot(), "projection reflects A")
 
-        val roomB = FakeRoom()
-        assertTrue(store.ensureStarted(roomB, ROOM_B), "switch must take ownership of B")
+        assertTrue(store.ensureStarted(FakeRoom(), ROOM_B), "switching active to B takes ownership of B")
+        assertEquals(listOf(bSession), store.sessionsSnapshot(), "projection now reflects B")
 
-        assertTrue(
-            instanceA.closed,
-            "switch must mark old instance closed under stateLock so stale discovery / refresh callbacks reject before teardown",
-        )
+        // A is still alive in the background (per-room flow intact).
+        assertNotNull(store.sessionsForRoom(ROOM_A), "A must remain alive as a background instance")
 
         store.shutdown()
     }
 
     @Test
-    fun `start tears down any inconsistent prior instance under stateLock`() {
-        // Defensive: decide() returns Start when slot is empty OR already
-        // closed. If a prior path left `_active != null` together with a
-        // closed slot, the Start branch must still mark the survivor closed
-        // and feed it to teardown — the new instance must be the only one
-        // bound to SDK handles.
+    fun `stopForRoom tears down only the target room and leaves others intact`() {
+        // Multi-instance: stopForRoom removes exactly one room's instance.
+        // Other rooms (active or background) are untouched. This is the path
+        // used when a room is removed from the push set.
         val store = RoomSessionListStore(FakeSettingsRepository(), Dispatchers.Unconfined)
 
         val roomA = FakeRoom()
         val serviceA = FakeThreadListService().also { roomA.service = it }
         assertTrue(store.ensureStarted(roomA, ROOM_A))
-        val instanceA = readActiveInstance(store) ?: error("expected active instance")
-
-        // Force the inconsistent state: close the slot without clearing
-        // `_active`. decide() now returns Start for any room (including A).
-        forceSlotClosedWithoutClearingActive(store)
 
         val roomB = FakeRoom()
-        assertTrue(store.ensureStarted(roomB, ROOM_B), "Start must take ownership of the new handle")
+        val serviceB = FakeThreadListService().also { roomB.service = it }
+        assertTrue(store.ensureStartedForPushRoom(roomB, ROOM_B))
 
-        // The survivor was marked closed and its native handles torn down.
-        assertTrue(instanceA.closed, "Start must mark any prior instance closed")
-        assertTrue(serviceA.closeCount.get() >= 1, "Start must tear down prior service")
-        assertTrue(roomA.closeCount.get() >= 1, "Start must tear down prior room")
+        // Tear down only A. B must be unaffected.
+        store.stopForRoom(ROOM_A)
+
+        assertTrue(serviceA.closeCount.get() >= 1, "stopForRoom must close A's service")
+        assertTrue(roomA.closeCount.get() >= 1, "stopForRoom must close A's room")
+        assertNull(store.sessionsForRoom(ROOM_A), "A must be gone after stopForRoom")
+        assertNotNull(store.sessionsForRoom(ROOM_B), "B must survive stopForRoom(A)")
+        assertEquals(0, serviceB.closeCount.get(), "B's service must NOT be closed")
+        assertEquals(0, roomB.closeCount.get(), "B's room must NOT be closed")
 
         store.shutdown()
-    }
-
-    private fun readActiveInstance(store: RoomSessionListStore): ActiveInstance? {
-        val field = RoomSessionListStore::class.java.getDeclaredField("_active")
-        field.isAccessible = true
-        return field.get(store) as? ActiveInstance
-    }
-
-    private fun forceSlotClosedWithoutClearingActive(store: RoomSessionListStore) {
-        val slotField = RoomSessionListStore::class.java.getDeclaredField("slot")
-        slotField.isAccessible = true
-        val slot = slotField.get(store)!!
-        val closedField = slot.javaClass.getDeclaredField("_closed")
-        closedField.isAccessible = true
-        closedField.setBoolean(slot, true)
     }
 
     @Test

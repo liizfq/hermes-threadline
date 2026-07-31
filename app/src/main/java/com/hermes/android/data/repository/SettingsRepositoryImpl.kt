@@ -2,9 +2,11 @@ package com.hermes.android.data.repository
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import com.hermes.android.domain.model.Session
 import com.hermes.android.ui.settings.LocaleManager
 import org.json.JSONArray
@@ -33,10 +35,108 @@ internal fun sessionCacheKey(roomId: String): String = SESSION_CACHE_KEY_PREFIX 
 /** Prefix for room-scoped event-id → thread-root-id index keys. */
 internal const val EVENT_THREAD_ROOT_KEY_PREFIX = "event_thread_root_index::"
 
-/** Max entries kept per room; LRU eviction when this threshold is exceeded. */
-internal const val EVENT_THREAD_ROOT_MAX_PER_ROOM = 1000
+/**
+ * Prefs key holding the user-selected push/drawer room set as a JSON array
+ * string (`["!a:server","!b:server"]`). An empty/absent value means "no rooms
+ * selected". Removed (not stored as `[]`) when the set is empty.
+ */
+internal const val PUSH_ROOM_IDS_KEY = "push_room_ids"
+
+/**
+ * Serialize [ids] into a JSON array string. Pure Kotlin (no `org.json`) so
+ * the unit tests can exercise the real [SettingsRepositoryImpl] write path —
+ * the android.jar test stub throws on `org.json` methods, which would make
+ * `replacePushRoomIds` untestable through the Impl.
+ *
+ * Matrix room ids (`!localpart:server`) never contain `"`, `\`, or control
+ * chars, so a plain-quote join is byte-identical to what `JSONArray` would
+ * emit for the inputs this store actually persists.
+ */
+internal fun encodePushRoomIds(ids: Collection<String>): String {
+    val sb = StringBuilder("[")
+    var first = true
+    for (id in ids) {
+        if (!first) sb.append(',')
+        first = false
+        sb.append('"')
+        for (ch in id) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> sb.append(ch)
+            }
+        }
+        sb.append('"')
+    }
+    sb.append(']')
+    return sb.toString()
+}
+
+/**
+ * Parse a JSON array string produced by [encodePushRoomIds] back into a set.
+ * Fail-open: any parse error yields an empty set (a corrupt key must never
+ * crash the app). Pure Kotlin for the same testability reason as the encoder.
+ */
+internal fun decodePushRoomIds(json: String?): Set<String> {
+    if (json.isNullOrBlank()) return emptySet()
+    return try {
+        val s = json.trim()
+        require(s.startsWith('[') && s.endsWith(']')) { "not a JSON array" }
+        val body = s.substring(1, s.length - 1)
+        if (body.isBlank()) return emptySet()
+        val result = linkedSetOf<String>()
+        val token = StringBuilder()
+        var inString = false
+        var escaped = false
+        var expectCommaOrEnd = false
+        for (ch in body) {
+            if (inString) {
+                if (escaped) {
+                    when (ch) {
+                        '"' -> token.append('"')
+                        '\\' -> token.append('\\')
+                        'n' -> token.append('\n')
+                        'r' -> token.append('\r')
+                        't' -> token.append('\t')
+                        else -> token.append(ch)
+                    }
+                    escaped = false
+                } else when (ch) {
+                    '\\' -> escaped = true
+                    '"' -> {
+                        inString = false
+                        expectCommaOrEnd = true
+                        result.add(token.toString())
+                        token.setLength(0)
+                    }
+                    else -> token.append(ch)
+                }
+            } else {
+                when {
+                    ch == '"' -> { inString = true; token.setLength(0) }
+                    ch.isWhitespace() -> Unit
+                    ch == ',' -> {
+                        require(expectCommaOrEnd) { "unexpected ',' " }
+                        expectCommaOrEnd = false
+                    }
+                    else -> throw IllegalArgumentException("unexpected char '$ch' outside string")
+                }
+            }
+        }
+        require(!inString && !escaped) { "unterminated string" }
+        result
+    } catch (_: Exception) {
+        emptySet()
+    }
+}
 
 internal fun eventThreadRootKey(roomId: String): String = EVENT_THREAD_ROOT_KEY_PREFIX + roomId
+
+/** Max entries kept per room; LRU eviction when this threshold is exceeded. */
+internal const val EVENT_THREAD_ROOT_MAX_PER_ROOM = 1000
 
 /**
  * Read the room-scoped cache JSON for [roomId], migrating the legacy
@@ -145,6 +245,64 @@ class SettingsRepositoryImpl @Inject constructor(
 
     private val boundRoomFlow = MutableStateFlow(getBoundRoomId())
 
+    /**
+     * In-memory mirror of the push room set, seeded from prefs at construction.
+     * [replacePushRoomIds] is the only writer; readers go through
+     * [observePushRoomIds] / [getPushRoomIds] and never touch prefs directly.
+     */
+    private val pushRoomFlow = MutableStateFlow(loadPushRoomIdsFromPrefs())
+
+    override fun getPushRoomIds(): Set<String> = pushRoomFlow.value
+
+    override fun observePushRoomIds(): Flow<Set<String>> = pushRoomFlow.asStateFlow()
+
+    override suspend fun replacePushRoomIds(ids: Set<String>) {
+        val snapshot = ids.toSet()
+        val editor = prefs.edit()
+        if (snapshot.isEmpty()) {
+            editor.remove(PUSH_ROOM_IDS_KEY)
+        } else {
+            editor.putString(PUSH_ROOM_IDS_KEY, encodePushRoomIds(snapshot))
+        }
+        editor.apply()
+        pushRoomFlow.value = snapshot
+    }
+
+    override suspend fun setActiveRoom(roomId: String) {
+        if (roomId !in pushRoomFlow.value) {
+            Log.w(
+                "SettingsRepository",
+                "setActiveRoom($roomId) rejected: not in push room set " +
+                    "${pushRoomFlow.value}; keeping prior active room."
+            )
+            return
+        }
+        prefs.edit().putString("bound_room_id", roomId).apply()
+        boundRoomFlow.value = roomId
+    }
+
+    /**
+     * Launch-time active room resolution (read-only — does NOT write back to
+     * prefs):
+     *  - `bound_room_id` if it is non-null AND present in the push set;
+     *  - else the first element of the push set, if any;
+     *  - else null.
+     *
+     * Because this does not persist the fallback, the caller (MainActivity at
+     * launch) MUST explicitly call [setActiveRoom] with the resolved id once,
+     * so that `bound_room_id` / [observeBoundRoom] converge on the recognized
+     * active room. (Wiring that launch-time write-back is phase C; not done
+     * in this phase — see multi-room-support design §2.1.)
+     */
+    override fun resolveActiveRoomId(): String? {
+        val pushSet = pushRoomFlow.value
+        val bound = getBoundRoomId()
+        return if (bound != null && bound in pushSet) bound else pushSet.firstOrNull()
+    }
+
+    private fun loadPushRoomIdsFromPrefs(): Set<String> =
+        decodePushRoomIds(prefs.getString(PUSH_ROOM_IDS_KEY, null))
+
     override fun getHomeserverUrl(): String? = prefs.getString("homeserver_url", null)
     override fun getUserId(): String? = prefs.getString("user_id", null)
     override fun getAccessToken(): String? = prefs.getString("access_token", null)
@@ -167,8 +325,12 @@ class SettingsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun saveBoundRoomId(roomId: String) {
-        prefs.edit().putString("bound_room_id", roomId).apply()
-        boundRoomFlow.value = roomId
+        // Unified entry: delegate to [setActiveRoom] so the push-set membership
+        // check (reject + warn + keep the prior value when [roomId] is not in
+        // the push set) is applied consistently. Callers that previously wrote
+        // `bound_room_id` directly now go through the same validation as
+        // [setActiveRoom]; the signature is unchanged.
+        setActiveRoom(roomId)
     }
 
     override suspend fun saveSlidingSyncVersion(version: String) {
@@ -178,6 +340,7 @@ class SettingsRepositoryImpl @Inject constructor(
     override suspend fun clear() {
         prefs.edit().clear().apply()
         boundRoomFlow.value = null
+        pushRoomFlow.value = emptySet()
     }
 
     override fun getSessionReadTimestamps(): Map<String, Long> {
@@ -298,7 +461,7 @@ class SettingsRepositoryImpl @Inject constructor(
      * Process-wide lock serializing the index read-modify-write cycle.
      *
      * Three concurrent writers feed the index:
-     *  - [RoomSessionListStore.publishIfActive] (session list updates)
+     *  - [RoomSessionListStore.publish] (session list updates)
      *  - [ActiveThreadImpl] diff stream (per-thread message ids)
      *  - [EventPushWorker.indexResolvedEvents] (push-delivered events)
      *

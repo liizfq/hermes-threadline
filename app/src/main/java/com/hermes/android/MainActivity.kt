@@ -30,11 +30,15 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.hermes.android.presentation.card.CardScreen
+import com.hermes.android.presentation.card.CardViewModel
 import com.hermes.android.presentation.chat.ChatScreen
 import com.hermes.android.presentation.login.LoginScreen
 import com.hermes.android.presentation.sessionlist.NewSessionScreen
 import com.hermes.android.presentation.sessionlist.SessionListScreen
+import com.hermes.android.presentation.settings.RoomPickerScreen
 import com.hermes.android.presentation.settings.SettingsScreen
+import com.hermes.android.presentation.settings.SettingsViewModel
 import com.hermes.android.presentation.splash.SplashViewModel
 import com.hermes.android.ui.settings.ChatFontScaleState
 import com.hermes.android.ui.settings.ChatFontSize
@@ -111,18 +115,35 @@ fun HermesNavHost(
 ) {
     val navController = rememberNavController()
     val splashViewModel: SplashViewModel = hiltViewModel()
+    val mainNavViewModel: MainNavViewModel = hiltViewModel()
     val splashState by splashViewModel.splashState.collectAsState()
+    val resolvedActiveRoomId by splashViewModel.resolvedActiveRoomId.collectAsState()
+    val boundRoomId by mainNavViewModel.boundRoomId.collectAsState()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
     var lastHandledGen by remember { mutableIntStateOf(0) }
 
-    // Splash → Sessions or Login.
+    // When the active room changes (drawer switch), drop any pending thread
+    // navigation: the pending thread belongs to the OLD room and would land in
+    // the wrong session list. We stay on the session screen regardless.
+    var lastBoundRoom by remember { mutableStateOf(boundRoomId) }
+    LaunchedEffect(boundRoomId) {
+        if (boundRoomId != lastBoundRoom) {
+            lastBoundRoom = boundRoomId
+            pendingThreadNav.value = null
+        }
+    }
+
+    // Splash → Sessions or Login. When logged in but no active room can be
+    // resolved (push set empty), route to Settings so the user selects rooms
+    // first; otherwise go to the session list.
     LaunchedEffect(splashState) {
         when (splashState) {
             is SplashViewModel.SplashState.LoggedIn -> {
                 if (navController.currentDestination?.route == "splash") {
-                    navController.navigate("sessions") {
+                    val target = if (resolvedActiveRoomId == null) "settings" else "sessions"
+                    navController.navigate(target) {
                         popUpTo("splash") { inclusive = true }
                         launchSingleTop = true
                     }
@@ -185,6 +206,9 @@ fun HermesNavHost(
                         launchSingleTop = true
                     }
                 },
+                onCardClick = { eventId, encodedText ->
+                    navController.navigate("card/$eventId?text=$encodedText")
+                },
                 onNewSession = {
                     navController.navigate("new_session")
                 },
@@ -212,6 +236,9 @@ fun HermesNavHost(
                                     launchSingleTop = true
                                 }
                             },
+                            onCardClick = { eventId, encodedText ->
+                                navController.navigate("card/$eventId?text=$encodedText")
+                            },
                             onNewSession = {
                                 navController.navigate("new_session")
                             },
@@ -236,6 +263,27 @@ fun HermesNavHost(
                 )
             }
         }
+        composable(
+            "card/{eventId}?text={text}",
+            arguments = listOf(
+                navArgument("eventId") { type = NavType.StringType },
+                navArgument("text") { type = NavType.StringType; defaultValue = "" }
+            )
+        ) {
+            val cardViewModel: CardViewModel = hiltViewModel()
+            val originalText by cardViewModel.originalText.collectAsState()
+            CardScreen(
+                originalText = originalText,
+                onSend = { userInput ->
+                    cardViewModel.sendReply(userInput) { result ->
+                        if (result.isSuccess) {
+                            navController.popBackStack("sessions", inclusive = false)
+                        }
+                    }
+                },
+                onBack = { navController.popBackStack() }
+            )
+        }
         composable("new_session") {
             val parentEntry = remember(it) {
                 navController.getBackStackEntry("sessions")
@@ -247,13 +295,28 @@ fun HermesNavHost(
             )
         }
         composable("settings") {
+            val settingsViewModel: SettingsViewModel = hiltViewModel()
             SettingsScreen(
                 onBack = { navController.popBackStack() },
                 onLogout = {
                     navController.navigate("login") {
                         popUpTo(0) { inclusive = true }
                     }
-                }
+                },
+                onNavigateToRooms = { navController.navigate("roomPicker") },
+                viewModel = settingsViewModel
+            )
+        }
+        composable("roomPicker") {
+            // Reuse the SettingsViewModel scoped to the parent "settings" route
+            // so the room list / push-room set are not fetched twice and toggles
+            // are reflected immediately when the user returns to Settings.
+            val parentEntry = remember(it) {
+                navController.getBackStackEntry("settings")
+            }
+            RoomPickerScreen(
+                onBack = { navController.popBackStack() },
+                viewModel = hiltViewModel(parentEntry)
             )
         }
     }
@@ -263,6 +326,7 @@ fun HermesNavHost(
 private fun AdaptiveSessionsLayout(
     isLandscape: Boolean,
     onSessionClick: (String) -> Unit,
+    onCardClick: (eventId: String, encodedText: String) -> Unit,
     onNewSession: () -> Unit,
     onSettings: () -> Unit
 ) {
@@ -271,6 +335,7 @@ private fun AdaptiveSessionsLayout(
             listContent = {
                 SessionListScreen(
                     onSessionClick = onSessionClick,
+                    onCardClick = onCardClick,
                     onNewSession = onNewSession,
                     onSettings = onSettings
                 )
@@ -280,6 +345,7 @@ private fun AdaptiveSessionsLayout(
     } else {
         SessionListScreen(
             onSessionClick = onSessionClick,
+            onCardClick = onCardClick,
             onNewSession = onNewSession,
             onSettings = onSettings
         )

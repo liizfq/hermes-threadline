@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -150,6 +152,11 @@ internal class FakeSettingsRepository : SettingsRepository {
     var saveCount: Int = 0
         private set
 
+    override fun getPushRoomIds(): Set<String> = emptySet()
+    override fun observePushRoomIds(): Flow<Set<String>> = flowOf(emptySet())
+    override suspend fun replacePushRoomIds(ids: Set<String>) {}
+    override suspend fun setActiveRoom(roomId: String) {}
+    override fun resolveActiveRoomId(): String? = null
     override fun getHomeserverUrl(): String? = null
     override fun getUserId(): String? = null
     override fun getAccessToken(): String? = null

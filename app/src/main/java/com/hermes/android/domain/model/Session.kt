@@ -11,5 +11,6 @@ data class Session(
     val unreadCount: Int,              // Unread count
     val isProcessing: Boolean,         // Whether agent is processing
     val senderAvatarUrl: String?,      // Sender avatar
-    val latestEventId: String? = null  // ThreadList latest event ID (reconciliation)
+    val latestEventId: String? = null, // ThreadList latest event ID (reconciliation)
+    val isCard: Boolean = false        // true = non-thread message rendered as a card
 )

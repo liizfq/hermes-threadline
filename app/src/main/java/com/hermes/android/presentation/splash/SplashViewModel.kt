@@ -29,6 +29,15 @@ class SplashViewModel @Inject constructor(
     private val _splashState = MutableStateFlow<SplashState>(SplashState.Loading)
     val splashState: StateFlow<SplashState> = _splashState
 
+    /**
+     * Launch-time active room id resolved right after a successful login
+     * check (snapshot, not reactive). `null` means the push set is empty or
+     * no active room could be resolved — MainActivity then routes to
+     * Settings instead of the session list so the user picks rooms first.
+     */
+    private val _resolvedActiveRoomId = MutableStateFlow<String?>(null)
+    val resolvedActiveRoomId: StateFlow<String?> = _resolvedActiveRoomId
+
     private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Log.e(TAG, "Unhandled coroutine exception", throwable)
     }
@@ -49,6 +58,7 @@ class SplashViewModel @Inject constructor(
             // the client is still alive, skip restoreSession to avoid
             // re-creating Client and a loading flash.
             if (matrixRepository.getClient() != null) {
+                _resolvedActiveRoomId.value = settingsRepository.resolveActiveRoomId()
                 _splashState.value = SplashState.LoggedIn
                 return@launch
             }
@@ -56,6 +66,7 @@ class SplashViewModel @Inject constructor(
             try {
                 val result = matrixRepository.restoreSession()
                 if (result != null && result.isSuccess) {
+                    _resolvedActiveRoomId.value = settingsRepository.resolveActiveRoomId()
                     _splashState.value = SplashState.LoggedIn
                 } else {
                     _splashState.value = SplashState.NotLoggedIn

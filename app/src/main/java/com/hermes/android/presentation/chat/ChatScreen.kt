@@ -627,7 +627,7 @@ private fun List<Message>.toGroupedRenderItems(): List<ChatRenderItem> {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(
+internal fun MessageBubble(
     message: Message,
     onReactionClick: ((String) -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,

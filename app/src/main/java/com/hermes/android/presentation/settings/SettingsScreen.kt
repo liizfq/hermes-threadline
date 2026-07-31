@@ -32,15 +32,15 @@ import com.hermes.android.ui.settings.strEnZh
 fun SettingsScreen(
     onBack: () -> Unit,
     onLogout: () -> Unit,
+    onNavigateToRooms: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val boundRoomId by viewModel.boundRoomId.collectAsState()
+    val pushRoomIds by viewModel.pushRoomIds.collectAsState()
     val logoutState by viewModel.logoutState.collectAsState()
     val pushState by viewModel.pushState.collectAsState()
     val language by viewModel.language.collectAsState()
-    var roomInput by remember { mutableStateOf("") }
-    var saved by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
     var showPermissionRationale by remember { mutableStateOf(false) }
     var pendingEnablePush by remember { mutableStateOf(false) }
@@ -87,13 +87,6 @@ fun SettingsScreen(
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         runCatching { context.startActivity(intent) }
-    }
-
-    // Update roomInput when boundRoomId changes
-    LaunchedEffect(boundRoomId) {
-        if (roomInput.isEmpty() && boundRoomId != null) {
-            roomInput = boundRoomId!!
-        }
     }
 
     // Handle logout success
@@ -241,32 +234,38 @@ fun SettingsScreen(
             HorizontalDivider()
 
             // ---- Room configuration ----
-            Text(strEnZh("Room Configuration", "房间配置"), style = MaterialTheme.typography.titleMedium)
-            OutlinedTextField(
-                value = roomInput,
-                onValueChange = {
-                    roomInput = it
-                    saved = false
-                },
-                label = { Text(strEnZh("Bound Room ID", "绑定房间 ID")) },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("!roomid:server.com") }
-            )
-            Button(
-                onClick = {
-                    viewModel.saveBoundRoom(roomInput)
-                    saved = true
-                },
-                enabled = roomInput.isNotBlank()
+            // The full checkbox list lives in the secondary RoomPickerScreen.
+            // Here we only expose a single tappable row showing the current
+            // count, plus the read-only active-room display below it.
+            Surface(
+                onClick = onNavigateToRooms,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(strEnZh("Save", "保存"))
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        strEnZh("Rooms", "房间"),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        strEnZh(
+                            "${pushRoomIds.size} selected",
+                            "已选择 ${pushRoomIds.size} 个"
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
-            if (saved) {
-                Text(strEnZh("✓ Saved", "✓ 已保存"), color = MaterialTheme.colorScheme.primary)
-            }
-
+            // Active room (read-only display)
             if (boundRoomId != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    strEnZh("Active room", "当前活跃房间"),
+                    style = MaterialTheme.typography.bodyMedium
+                )
                 Text(
                     strEnZh("Currently bound: $boundRoomId", "当前绑定: $boundRoomId"),
                     style = MaterialTheme.typography.bodySmall

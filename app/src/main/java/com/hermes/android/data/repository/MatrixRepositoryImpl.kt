@@ -82,6 +82,27 @@ class MatrixRepositoryImpl @Inject constructor(
     /** Pending delayed-stop job; cancelled when returning to foreground. */
     private var stopSyncJob: Job? = null
 
+    /**
+     * Background collector over [SettingsRepository.observePushRoomIds] that
+     * starts/stops store instances as rooms enter/leave the push set (design
+     * §3.4). Seeded to the current set on first login/restore so the initial
+     * re-emit does not re-start already-running rooms. Cancelled on logout.
+     */
+    @Volatile
+    private var pushRoomCollectorJob: Job? = null
+
+    /**
+     * Last push set seen by [pushRoomCollectorJob], used to diff added/removed
+     * rooms. Guarded by [syncLifecycleMutex] on writes to serialize against
+     * logout teardown.
+     */
+    @Volatile
+    private var lastObservedPushRooms: Set<String> = emptySet()
+
+    /** Guards one-time startup of the push-room observer (set under syncLifecycleMutex). */
+    @Volatile
+    private var pushObserverStarted = false
+
     override fun onStart(owner: LifecycleOwner) {
         foreground = true
         val c = client
@@ -226,37 +247,131 @@ class MatrixRepositoryImpl @Inject constructor(
     }
 
     /**
-     * Idempotently bind the [RoomSessionListStore] to the bound room once the
-     * client is authenticated. The bound room may take a few seconds to
-     * materialize via sync, so retry briefly before giving up — at which point
-     * SessionListViewModel's ensureStarted remains as a fallback when the user
-     * opens the UI.
+     * Bind [sessionListStore] to every room in the user's push set once the
+     * client is authenticated (design §3.3). The active room (legacy bound
+     * room) is started first via [RoomSessionListStore.ensureStarted] so its
+     * session stream becomes the active projection; the remaining push rooms
+     * are started serially afterwards as background instances via
+     * [RoomSessionListStore.ensureStartedForPushRoom] (refresh / discovery /
+     * cache only, no UI side-effect). When the push set is empty we fall back
+     * to the legacy single bound room.
      *
-     * The Room handle is dedicated to the store: on Start / Switch the store
-     * takes ownership (closes it on teardown); on NoOp (already started) the
-     * duplicate handle is closed here.
+     * A room may take a few seconds to materialize via sync, so each room is
+     * retried briefly. MVP is serial (design §7); per-room start is NoOp-safe.
+     * Also kicks off (once) the dynamic push-set observer (§3.4) that starts
+     * newly-selected rooms and stops deselected ones.
      */
     private fun maybeStartSessionStore(c: Client) {
-        val roomId = settingsRepository.getBoundRoomId() ?: return
+        val rooms = effectivePushRooms()
+        val activeRoomId = settingsRepository.getBoundRoomId()
+        // Order: active room first (it owns the UI projection), then the rest.
+        val ordered = buildList {
+            if (activeRoomId != null && activeRoomId in rooms) add(activeRoomId)
+            for (r in rooms) if (r != activeRoomId) add(r)
+        }
         scope.launch {
-            repeat(5) { attempt ->
-                try {
-                    val room = withContext(Dispatchers.IO) { c.getRoom(roomId) }
-                    if (room != null) {
-                        val tookOwnership = sessionListStore.ensureStarted(room, roomId)
-                        if (!tookOwnership) {
-                            try { room.close() } catch (_: Exception) {}
-                        }
-                        return@launch
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.d(TAG, "maybeStartSessionStore: attempt ${attempt + 1} failed: ${e.message}")
-                }
-                if (attempt < 4) delay(1000)
+            for (roomId in ordered) {
+                val isActive = roomId == activeRoomId
+                startRoomInstance(c, roomId, isActive)
             }
-            Log.w(TAG, "maybeStartSessionStore: room $roomId not available after 5 attempts")
+        }
+        observePushRoomChanges(c)
+    }
+
+    /**
+     * The rooms the session-list store should hold: the user's push set, with
+     * a fallback to the legacy single bound room when the set is empty (design
+     * §3.3, §2.1). The active room is whichever [getBoundRoomId] returns.
+     */
+    private fun effectivePushRooms(): Set<String> {
+        val pushRooms = settingsRepository.getPushRoomIds()
+        if (pushRooms.isNotEmpty()) return pushRooms
+        val bound = settingsRepository.getBoundRoomId() ?: return emptySet()
+        return setOf(bound)
+    }
+
+    /**
+     * Fetch [roomId] from the client (retrying briefly while sync materializes
+     * it) and bind a store instance. Active rooms go through [ensureStarted]
+     * (UI projection ownership); non-active push rooms go through
+     * [ensureStartedForPushRoom] (background). On a NoOp (room already live)
+     * the duplicate handle is closed here.
+     */
+    private suspend fun startRoomInstance(c: Client, roomId: String, isActive: Boolean) {
+        repeat(5) { attempt ->
+            try {
+                val room = withContext(Dispatchers.IO) { c.getRoom(roomId) }
+                if (room != null) {
+                    val tookOwnership = if (isActive) {
+                        sessionListStore.ensureStarted(room, roomId)
+                    } else {
+                        sessionListStore.ensureStartedForPushRoom(room, roomId)
+                    }
+                    if (!tookOwnership) {
+                        try { room.close() } catch (_: Exception) {}
+                    }
+                    return
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(
+                    TAG,
+                    "startRoomInstance: attempt ${attempt + 1} failed for $roomId: ${e.message}"
+                )
+            }
+            if (attempt < 4) delay(1000)
+        }
+        Log.w(TAG, "startRoomInstance: room $roomId not available after 5 attempts")
+    }
+
+    /**
+     * Subscribe (once) to push-set changes (design §3.4): rooms removed from
+     * the set have their store instance torn down via [stopForRoom]; rooms
+     * added are started (active room as active, others as background). This
+     * closes the loop with [maybeStartSessionStore]'s login-time startup —
+     * together they keep the running instances in sync with the push set while
+     * the client is authenticated.
+     *
+     * The collector is seeded to the current set so the flow's initial re-emit
+     * produces no diff and does not re-start already-running rooms.
+     */
+    private fun observePushRoomChanges(c: Client) {
+        if (pushObserverStarted) return
+        pushObserverStarted = true
+        lastObservedPushRooms = effectivePushRooms()
+        pushRoomCollectorJob?.cancel()
+        pushRoomCollectorJob = scope.launch {
+            settingsRepository.observePushRoomIds().collect { newSet ->
+                val effective = if (newSet.isNotEmpty()) {
+                    newSet
+                } else {
+                    // Legacy fallback: empty set still implies the bound room.
+                    val bound = settingsRepository.getBoundRoomId()
+                    if (bound != null) setOf(bound) else emptySet()
+                }
+                val old = lastObservedPushRooms
+                if (effective == old) return@collect
+                lastObservedPushRooms = effective
+
+                val removed = old - effective
+                val added = effective - old
+
+                // Stop deselected rooms synchronously (fast; teardown runs
+                // off the instance scope).
+                for (roomId in removed) {
+                    Log.d(TAG, "push set: stopForRoom $roomId")
+                    sessionListStore.stopForRoom(roomId)
+                }
+                // Start newly-selected rooms without blocking the collector.
+                // The active room (if newly added) is started as active so its
+                // projection is owned; others as background.
+                val activeRoomId = settingsRepository.getBoundRoomId()
+                for (roomId in added) {
+                    Log.d(TAG, "push set: startRoomInstance $roomId")
+                    scope.launch { startRoomInstance(c, roomId, isActive = roomId == activeRoomId) }
+                }
+            }
         }
     }
 
@@ -459,6 +574,14 @@ class MatrixRepositoryImpl @Inject constructor(
         // Cancel any pending delayed-stop job so it won't race with us.
         stopSyncJob?.cancel()
         stopSyncJob = null
+
+        // Cancel the push-set observer so it stops starting/stopping rooms
+        // while we tear down, and reset its state so the next login/restore
+        // can re-seed. shutdown() below disposes all running instances.
+        pushRoomCollectorJob?.cancel()
+        pushRoomCollectorJob = null
+        pushObserverStarted = false
+        lastObservedPushRooms = emptySet()
 
         // Tear down the application-scoped session-list pipeline so the next
         // login / restore can rebind cleanly to a (possibly different) room.

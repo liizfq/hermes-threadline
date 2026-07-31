@@ -1,9 +1,11 @@
 package com.hermes.android.presentation.sessionlist
 
 import androidx.compose.foundation.layout.*
+import android.net.Uri
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
@@ -21,6 +23,7 @@ import com.hermes.android.domain.model.Session
 import com.hermes.android.presentation.UiState
 import com.hermes.android.ui.settings.strEnZh
 import com.hermes.android.ui.theme.AgentColors
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -28,60 +31,81 @@ fun SessionListScreen(
     onSessionClick: (String) -> Unit,
     onNewSession: () -> Unit,
     onSettings: () -> Unit = {},
+    onCardClick: (eventId: String, encodedText: String) -> Unit = { _, _ -> },
     viewModel: SessionListViewModel = hiltViewModel()
 ) {
     val sessions by viewModel.filteredSessions.collectAsState()
     val boundRoomId by viewModel.boundRoomId.collectAsState()
+    val drawerRooms by viewModel.drawerRooms.collectAsState()
+    val activeRoomDisplayName by viewModel.activeRoomDisplayName.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    if (isSearchActive) {
-                        TextField(
-                            value = searchQuery,
-                            onValueChange = viewModel::onSearchQueryChange,
-                            placeholder = { Text(strEnZh("Search sessions...", "搜索会话...")) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent
-                            )
-                        )
-                    } else {
-                        Text("Hermes Threadline")
-                    }
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            RoomListDrawer(
+                rooms = drawerRooms,
+                activeRoomId = boundRoomId,
+                activeRoomDisplayName = activeRoomDisplayName,
+                onRoomClick = { roomId ->
+                    viewModel.setActiveRoom(roomId)
+                    scope.launch { drawerState.close() }
                 },
-                navigationIcon = {
-                    if (!isSearchActive) {
-                        IconButton(onClick = { }) {
-                            Icon(Icons.Default.Menu, contentDescription = strEnZh("Menu", "菜单"))
-                        }
-                    }
-                },
-                actions = {
-                    if (isSearchActive) {
-                        IconButton(onClick = viewModel::closeSearch) {
-                            Icon(Icons.Default.Close, contentDescription = strEnZh("Close search", "关闭搜索"))
-                        }
-                    } else {
-                        IconButton(onClick = onNewSession) {
-                            Icon(Icons.Default.Edit, contentDescription = strEnZh("New session", "新建会话"))
-                        }
-                        IconButton(onClick = viewModel::openSearch) {
-                            Icon(Icons.Default.Search, contentDescription = strEnZh("Search", "搜索"))
-                        }
-                        IconButton(onClick = onSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = strEnZh("Settings", "设置"))
-                        }
-                    }
-                }
+                onSettings = onSettings
             )
         }
-    ) { padding ->
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        if (isSearchActive) {
+                            TextField(
+                                value = searchQuery,
+                                onValueChange = viewModel::onSearchQueryChange,
+                                placeholder = { Text(strEnZh("Search sessions...", "搜索会话...")) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent
+                                )
+                            )
+                        } else {
+                            Text(activeRoomDisplayName)
+                        }
+                    },
+                    navigationIcon = {
+                        if (!isSearchActive) {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(Icons.Default.Menu, contentDescription = strEnZh("Menu", "菜单"))
+                            }
+                        }
+                    },
+                    actions = {
+                        if (isSearchActive) {
+                            IconButton(onClick = viewModel::closeSearch) {
+                                Icon(Icons.Default.Close, contentDescription = strEnZh("Close search", "关闭搜索"))
+                            }
+                        } else {
+                            IconButton(onClick = onNewSession) {
+                                Icon(Icons.Default.Edit, contentDescription = strEnZh("New session", "新建会话"))
+                            }
+                            IconButton(onClick = viewModel::openSearch) {
+                                Icon(Icons.Default.Search, contentDescription = strEnZh("Search", "搜索"))
+                            }
+                            IconButton(onClick = onSettings) {
+                                Icon(Icons.Default.Settings, contentDescription = strEnZh("Settings", "设置"))
+                            }
+                        }
+                    }
+                )
+            }
+        ) { padding ->
         if (boundRoomId == null) {
             Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -124,8 +148,14 @@ fun SessionListScreen(
                                 SessionCard(
                                     session = session,
                                     onClick = {
-                                        viewModel.markSessionRead(session.id)
-                                        onSessionClick(session.id)
+                                        if (session.isCard) {
+                                            val encodedText =
+                                                Uri.encode(session.lastMessage ?: "")
+                                            onCardClick(session.id, encodedText)
+                                        } else {
+                                            viewModel.markSessionRead(session.id)
+                                            onSessionClick(session.id)
+                                        }
                                     },
                                     onDelete = { pendingDelete = session },
                                     unreadCount = session.unreadCount,
@@ -178,5 +208,77 @@ fun SessionListScreen(
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * Navigation drawer listing the user's push-set rooms.
+ *
+ * Classic NavigationView layout: a header (active-room displayName over a
+ * primaryContainer band) → the room list → a divider → a Settings entry at
+ * the bottom. One row per room; the active room is highlighted. Tapping a
+ * room switches the active room immediately (no confirmation).
+ */
+@Composable
+private fun RoomListDrawer(
+    rooms: List<RoomDrawerItem>,
+    activeRoomId: String?,
+    activeRoomDisplayName: String,
+    onRoomClick: (String) -> Unit,
+    onSettings: () -> Unit
+) {
+    ModalDrawerSheet(
+        drawerShape = androidx.compose.foundation.shape.RoundedCornerShape(0.dp)
+    ) {
+        // ---- Header: active room displayName (NavigationView-style band) ----
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(start = 28.dp, top = 28.dp, end = 28.dp, bottom = 20.dp)) {
+                Text(
+                    text = activeRoomDisplayName,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    maxLines = 1
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Hermes Threadline",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
+            }
+        }
+
+        if (rooms.isEmpty()) {
+            Text(
+                strEnZh("No rooms selected", "未选择房间"),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(28.dp, 20.dp)
+            )
+        } else {
+            rooms.forEach { room ->
+                NavigationDrawerItem(
+                    label = { Text(room.displayName, maxLines = 1) },
+                    selected = room.roomId == activeRoomId,
+                    onClick = { onRoomClick(room.roomId) },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
+                    modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+                )
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+        HorizontalDivider()
+        NavigationDrawerItem(
+            label = { Text(strEnZh("Settings", "设置")) },
+            selected = false,
+            onClick = onSettings,
+            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+            modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
+        )
     }
 }
